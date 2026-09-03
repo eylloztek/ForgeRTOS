@@ -10,6 +10,7 @@ set(TARGET forgertos.elf)
 
 add_executable(${TARGET}
     startup/startup_stm32f446re.S
+    port/cortex_m4/cortex_m4.c
     bsp/stm32f446re/board.c
     src/main.c
 )
@@ -19,11 +20,14 @@ target_include_directories(${TARGET} PRIVATE include)
 target_compile_options(${TARGET} PRIVATE
     -mcpu=cortex-m4
     -mthumb
+    -ffreestanding
     -ffunction-sections
     -fdata-sections
     -fno-common
     -fno-unwind-tables
     -fno-asynchronous-unwind-tables
+    -Og
+    -g3
     -Wall
     -Wextra
     -Wpedantic

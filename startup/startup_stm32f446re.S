@@ -11,8 +11,10 @@
 .extern _ebss
 
 .section .isr_vector,"a",%progbits
-.align 2
+.align 9
 .global g_pfnVectors
+.type g_pfnVectors, %object
+
 g_pfnVectors:
     .word _estack
     .word Reset_Handler
@@ -31,12 +33,21 @@ g_pfnVectors:
     .word PendSV_Handler
     .word SysTick_Handler
 
+.size g_pfnVectors, .-g_pfnVectors
+
 .section .text.Reset_Handler,"ax",%progbits
 .align 2
 .global Reset_Handler
 .type Reset_Handler, %function
 .thumb_func
+
 Reset_Handler:
+    ldr r0, =0xE000ED08
+    ldr r1, =g_pfnVectors
+    str r1, [r0]
+    dsb
+    isb
+
     ldr r0, =_sidata
     ldr r1, =_sdata
     ldr r2, =_edata
@@ -64,6 +75,7 @@ Reset_Handler:
 
 5:
     b 5b
+
 .size Reset_Handler, .-Reset_Handler
 
 .section .text.Default_Handler,"ax",%progbits
@@ -71,8 +83,10 @@ Reset_Handler:
 .global Default_Handler
 .type Default_Handler, %function
 .thumb_func
+
 Default_Handler:
     b Default_Handler
+
 .size Default_Handler, .-Default_Handler
 
 .macro WEAK_DEFAULT handler

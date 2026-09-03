@@ -10,9 +10,9 @@ _estack = ORIGIN(RAM) + LENGTH(RAM);
 
 SECTIONS
 {
-    .isr_vector :
+    .isr_vector ORIGIN(FLASH) :
     {
-        . = ALIGN(4);
+        . = ALIGN(512);
         KEEP(*(.isr_vector))
         . = ALIGN(4);
     } > FLASH
@@ -61,3 +61,5 @@ SECTIONS
         *(.note*)
     }
 }
+
+ASSERT(ADDR(.isr_vector) == ORIGIN(FLASH), "Vector table must start at FLASH origin")

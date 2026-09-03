@@ -1,6 +1,9 @@
+#include "forge/arch/cortex_m4.h"
 #include "forge/board.h"
 
 int main(void) {
+    fr_arch_capture_boot_snapshot();
+
     fr_board_init();
 
     while (1) {
