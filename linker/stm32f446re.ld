@@ -44,11 +44,11 @@ SECTIONS
 
     .bss (NOLOAD) :
     {
-        . = ALIGN(4);
+        . = ALIGN(8);
         _sbss = .;
         *(.bss*)
         *(COMMON)
-        . = ALIGN(4);
+        . = ALIGN(8);
         _ebss = .;
     } > RAM
 

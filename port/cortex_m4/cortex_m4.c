@@ -39,3 +39,23 @@ void fr_arch_capture_boot_snapshot(void) {
     g_fr_arch_boot_snapshot.control = fr_arch_read_control();
     g_fr_arch_boot_snapshot.ipsr = fr_arch_read_ipsr();
 }
+
+void fr_arch_capture_stack_state(volatile fr_arch_stack_state_t *state) {
+    uint32_t sp;
+    uint32_t msp;
+    uint32_t psp;
+    uint32_t control;
+    uint32_t ipsr;
+
+    __asm volatile("mov %0, sp" : "=r"(sp));
+    __asm volatile("mrs %0, msp" : "=r"(msp));
+    __asm volatile("mrs %0, psp" : "=r"(psp));
+    __asm volatile("mrs %0, control" : "=r"(control));
+    __asm volatile("mrs %0, ipsr" : "=r"(ipsr));
+
+    state->sp = sp;
+    state->msp = msp;
+    state->psp = psp;
+    state->control = control;
+    state->ipsr = ipsr;
+}
