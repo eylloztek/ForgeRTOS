@@ -10,6 +10,7 @@ set(TARGET forgertos.elf)
 
 add_executable(${TARGET}
     startup/startup_stm32f446re.S
+    kernel/tick.c
     port/cortex_m4/cortex_m4.c
     port/cortex_m4/systick.c
     port/cortex_m4/portasm.S
@@ -17,7 +18,10 @@ add_executable(${TARGET}
     src/main.c
 )
 
-target_include_directories(${TARGET} PRIVATE include)
+target_include_directories(${TARGET} PRIVATE
+    include
+    kernel/include
+)
 
 target_compile_options(${TARGET} PRIVATE
     -mcpu=cortex-m4

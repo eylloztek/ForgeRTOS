@@ -1,4 +1,5 @@
 #include "forge/arch/systick.h"
+#include "forge/kernel/tick_internal.h"
 
 #define FR_SYSTICK_BASE                    0xE000E010u
 #define FR_SYSTICK_CTRL_ENABLE             (1u << 0)
@@ -15,8 +16,6 @@ typedef struct {
 } fr_systick_registers_t;
 
 #define FR_SYSTICK ((fr_systick_registers_t *)FR_SYSTICK_BASE)
-
-static volatile uint32_t g_fr_systick_ticks;
 
 bool fr_systick_init(uint32_t core_clock_hz, uint32_t tick_hz) {
     if ((core_clock_hz == 0u) || (tick_hz == 0u)) {
@@ -37,8 +36,6 @@ bool fr_systick_init(uint32_t core_clock_hz, uint32_t tick_hz) {
     FR_SYSTICK->load = cycles_per_tick - 1u;
     FR_SYSTICK->val = 0u;
 
-    g_fr_systick_ticks = 0u;
-
     FR_SYSTICK->ctrl = FR_SYSTICK_CTRL_CLKSOURCE |
                        FR_SYSTICK_CTRL_TICKINT |
                        FR_SYSTICK_CTRL_ENABLE;
@@ -46,10 +43,6 @@ bool fr_systick_init(uint32_t core_clock_hz, uint32_t tick_hz) {
     return true;
 }
 
-uint32_t fr_systick_get_ticks(void) {
-    return g_fr_systick_ticks;
-}
-
 void SysTick_Handler(void) {
-    ++g_fr_systick_ticks;
+    fr_kernel_tick_isr();
 }
