@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.20)
 
 project(ForgeRTOS VERSION 0.1.0 LANGUAGES C ASM)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
@@ -13,6 +15,7 @@ add_executable(${TARGET}
     kernel/tick.c
     port/cortex_m4/cortex_m4.c
     port/cortex_m4/systick.c
+    port/cortex_m4/critical.c
     port/cortex_m4/portasm.S
     bsp/stm32f446re/board.c
     src/main.c
