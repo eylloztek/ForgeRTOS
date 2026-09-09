@@ -12,11 +12,12 @@ set(TARGET forgertos.elf)
 
 add_executable(${TARGET}
     startup/startup_stm32f446re.S
+    kernel/task.c
     kernel/tick.c
     port/cortex_m4/cortex_m4.c
-    port/cortex_m4/systick.c
     port/cortex_m4/critical.c
     port/cortex_m4/fault.c
+    port/cortex_m4/systick.c
     port/cortex_m4/portasm.S
     bsp/stm32f446re/board.c
     src/main.c
