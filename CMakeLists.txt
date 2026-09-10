@@ -18,6 +18,7 @@ add_executable(${TARGET}
     port/cortex_m4/critical.c
     port/cortex_m4/fault.c
     port/cortex_m4/systick.c
+    port/cortex_m4/task_context.c
     port/cortex_m4/portasm.S
     bsp/stm32f446re/board.c
     src/main.c

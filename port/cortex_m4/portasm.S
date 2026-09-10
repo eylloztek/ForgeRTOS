@@ -32,6 +32,22 @@ SVC_Handler:
 
 .size SVC_Handler, .-SVC_Handler
 
+
+.section .text.fr_port_task_return_trap,"ax",%progbits
+.align 2
+.global fr_port_task_return_trap
+.type fr_port_task_return_trap, %function
+.thumb_func
+
+fr_port_task_return_trap:
+    udf #1
+
+1:
+    b 1b
+
+.size fr_port_task_return_trap, .-fr_port_task_return_trap
+
+
 .extern fr_fault_handle_c
 
 .macro FR_FAULT_ENTRY handler, fault_number

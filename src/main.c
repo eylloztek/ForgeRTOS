@@ -21,6 +21,9 @@ _Alignas(8) uint32_t g_fr_demo_bootstrap_stack[FR_DEMO_BOOTSTRAP_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_a_stack[FR_DEMO_TASK_A_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_b_stack[FR_DEMO_TASK_B_STACK_WORDS];
 
+uint32_t g_fr_demo_task_a_argument = 0xA1A1A1A1u;
+uint32_t g_fr_demo_task_b_argument = 0xB2B2B2B2u;
+
 fr_task_handle_t g_fr_demo_task_a;
 fr_task_handle_t g_fr_demo_task_b;
 
@@ -62,7 +65,7 @@ static void fr_demo_task_b_entry(void *argument) {
 static bool fr_demo_create_tasks(void) {
     const fr_task_config_t task_a_config = {
         .entry = fr_demo_task_a_entry,
-        .argument = NULL,
+        .argument = &g_fr_demo_task_a_argument,
         .stack_memory = g_fr_demo_task_a_stack,
         .stack_size_words = FR_DEMO_TASK_A_STACK_WORDS,
         .priority = 3u
@@ -70,7 +73,7 @@ static bool fr_demo_create_tasks(void) {
 
     const fr_task_config_t task_b_config = {
         .entry = fr_demo_task_b_entry,
-        .argument = NULL,
+        .argument = &g_fr_demo_task_b_argument,
         .stack_memory = g_fr_demo_task_b_stack,
         .stack_size_words = FR_DEMO_TASK_B_STACK_WORDS,
         .priority = 7u

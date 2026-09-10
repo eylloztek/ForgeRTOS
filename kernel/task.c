@@ -3,15 +3,17 @@
 
 #include "forge/config.h"
 #include "forge/critical.h"
+#include "forge/kernel/port.h"
 #include "forge/kernel/task_internal.h"
 #include "forge/task.h"
 
 static fr_task_t g_fr_task_pool[FR_CONFIG_MAX_TASKS];
 static volatile uint32_t g_fr_task_count;
 
-static bool fr_task_stack_is_valid(const fr_task_config_t *config) {
-    const uintptr_t stack_address = (uintptr_t)config->stack_memory;
+_Static_assert(FR_CONFIG_MAX_TASKS > 0u, "ForgeRTOS must support at least one task");
+_Static_assert(FR_CONFIG_MAX_TASK_PRIORITY <= UINT8_MAX, "Task priority must fit fr_task_priority_t");
 
+static bool fr_task_stack_is_valid(const fr_task_config_t *config) {
     if (config->stack_memory == NULL) {
         return false;
     }
@@ -24,11 +26,32 @@ static bool fr_task_stack_is_valid(const fr_task_config_t *config) {
         return false;
     }
 
-    if ((stack_address & 0x7u) != 0u) {
+    const uintptr_t stack_base = (uintptr_t)config->stack_memory;
+
+    if ((stack_base & 0x7u) != 0u) {
         return false;
     }
 
-    return true;
+    if ((uintptr_t)config->stack_size_words > (UINTPTR_MAX / sizeof(uint32_t))) {
+        return false;
+    }
+
+    const uintptr_t stack_size_bytes = (uintptr_t)config->stack_size_words * sizeof(uint32_t);
+
+    if (stack_base > (UINTPTR_MAX - stack_size_bytes)) {
+        return false;
+    }
+
+    const uintptr_t stack_top = stack_base + stack_size_bytes;
+
+    return (stack_top & 0x7u) == 0u;
+}
+
+static uint32_t *fr_task_calculate_stack_top(const fr_task_config_t *config) {
+    const uintptr_t stack_base = (uintptr_t)config->stack_memory;
+    const uintptr_t stack_size_bytes = (uintptr_t)config->stack_size_words * sizeof(uint32_t);
+
+    return (uint32_t *)(stack_base + stack_size_bytes);
 }
 
 static bool fr_task_handle_is_valid(fr_task_handle_t task) {
@@ -78,10 +101,10 @@ fr_task_status_t fr_task_create(fr_task_handle_t *out_task, const fr_task_config
         return FR_TASK_ERROR_INVALID_STACK;
     }
 
-    const fr_critical_state_t critical_state = fr_critical_enter();
+    const fr_critical_state_t reserve_state = fr_critical_enter();
 
     if (g_fr_task_count >= FR_CONFIG_MAX_TASKS) {
-        fr_critical_exit(critical_state);
+        fr_critical_exit(reserve_state);
         return FR_TASK_ERROR_NO_CAPACITY;
     }
 
@@ -89,9 +112,8 @@ fr_task_status_t fr_task_create(fr_task_handle_t *out_task, const fr_task_config
     fr_task_t *const task = &g_fr_task_pool[index];
 
     task->saved_sp = NULL;
-
     task->stack_base = config->stack_memory;
-    task->stack_top = config->stack_memory + config->stack_size_words;
+    task->stack_top = fr_task_calculate_stack_top(config);
 
     task->entry = config->entry;
     task->argument = config->argument;
@@ -105,9 +127,18 @@ fr_task_status_t fr_task_create(fr_task_handle_t *out_task, const fr_task_config
     task->state = FR_TASK_STATE_CREATED;
 
     g_fr_task_count = index + 1u;
+
+    fr_critical_exit(reserve_state);
+
+    uint32_t *const initial_sp = fr_port_task_stack_init(task->stack_top, task->entry, task->argument);
+
+    const fr_critical_state_t publish_state = fr_critical_enter();
+
+    task->saved_sp = initial_sp;
+    task->state = FR_TASK_STATE_READY;
     *out_task = task;
 
-    fr_critical_exit(critical_state);
+    fr_critical_exit(publish_state);
 
     return FR_TASK_OK;
 }
@@ -129,7 +160,6 @@ bool fr_task_get_info(fr_task_handle_t task, fr_task_info_t *out_info) {
     }
 
     out_info->id = task->id;
-
     out_info->state = task->state;
 
     out_info->priority = task->priority;
