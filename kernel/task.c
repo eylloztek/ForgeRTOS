@@ -175,3 +175,15 @@ bool fr_task_get_info(fr_task_handle_t task, fr_task_info_t *out_info) {
 
     return true;
 }
+
+uint32_t fr_task_internal_count(void) {
+    return g_fr_task_count;
+}
+
+fr_task_t *fr_task_internal_at(uint32_t index) {
+    if (index >= g_fr_task_count) {
+        return NULL;
+    }
+
+    return &g_fr_task_pool[index];
+}

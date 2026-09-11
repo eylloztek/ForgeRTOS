@@ -2,6 +2,10 @@
 .cpu cortex-m4
 .thumb
 
+.extern fr_scheduler_current_saved_sp
+.extern fr_fault_handle_c
+
+
 .section .text.fr_arch_enter_thread_psp,"ax",%progbits
 .align 2
 .global fr_arch_enter_thread_psp
@@ -21,6 +25,21 @@ fr_arch_enter_thread_psp:
 .size fr_arch_enter_thread_psp, .-fr_arch_enter_thread_psp
 
 
+.section .text.fr_port_start_first_task,"ax",%progbits
+.align 2
+.global fr_port_start_first_task
+.type fr_port_start_first_task, %function
+.thumb_func
+
+fr_port_start_first_task:
+    svc #0
+
+1:
+    b 1b
+
+.size fr_port_start_first_task, .-fr_port_start_first_task
+
+
 .section .text.SVC_Handler,"ax",%progbits
 .align 2
 .global SVC_Handler
@@ -28,7 +47,24 @@ fr_arch_enter_thread_psp:
 .thumb_func
 
 SVC_Handler:
+    bl fr_scheduler_current_saved_sp
+
+    cbz r0, 1f
+
+    ldmia r0!, {r4-r11}
+    msr psp, r0
+
+    mrs r1, control
+    orr r1, r1, #2
+    msr control, r1
+    isb
+
+    ldr lr, =0xFFFFFFFD
     bx lr
+
+1:
+    udf #2
+    b 1b
 
 .size SVC_Handler, .-SVC_Handler
 
@@ -42,13 +78,11 @@ SVC_Handler:
 fr_port_task_return_trap:
     udf #1
 
-1:
-    b 1b
+2:
+    b 2b
 
 .size fr_port_task_return_trap, .-fr_port_task_return_trap
 
-
-.extern fr_fault_handle_c
 
 .macro FR_FAULT_ENTRY handler, fault_number
 .section .text.\handler,"ax",%progbits

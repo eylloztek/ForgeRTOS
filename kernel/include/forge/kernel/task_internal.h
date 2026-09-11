@@ -22,4 +22,7 @@ struct fr_task {
     fr_task_state_t state;
 };
 
+uint32_t fr_task_internal_count(void);
+fr_task_t *fr_task_internal_at(uint32_t index);
+
 #endif
