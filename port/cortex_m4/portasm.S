@@ -2,7 +2,11 @@
 .cpu cortex-m4
 .thumb
 
+.equ FR_SVC_START_FIRST_TASK, 0
+.equ FR_SVC_YIELD,            1
+
 .extern fr_scheduler_current_saved_sp
+.extern fr_scheduler_yield_from_isr
 .extern fr_fault_handle_c
 
 
@@ -32,12 +36,25 @@ fr_arch_enter_thread_psp:
 .thumb_func
 
 fr_port_start_first_task:
-    svc #0
+    svc #FR_SVC_START_FIRST_TASK
 
 1:
     b 1b
 
 .size fr_port_start_first_task, .-fr_port_start_first_task
+
+
+.section .text.fr_port_yield,"ax",%progbits
+.align 2
+.global fr_port_yield
+.type fr_port_yield, %function
+.thumb_func
+
+fr_port_yield:
+    svc #FR_SVC_YIELD
+    bx lr
+
+.size fr_port_yield, .-fr_port_yield
 
 
 .section .text.SVC_Handler,"ax",%progbits
@@ -47,9 +64,40 @@ fr_port_start_first_task:
 .thumb_func
 
 SVC_Handler:
-    bl fr_scheduler_current_saved_sp
+    tst lr, #4
+    ite eq
+    mrseq r0, msp
+    mrsne r0, psp
 
-    cbz r0, 1f
+    ldr r1, [r0, #24]
+    subs r1, r1, #2
+    ldrb r2, [r1]
+
+    cmp r2, #FR_SVC_START_FIRST_TASK
+    beq .Lsvc_start_first
+
+    cmp r2, #FR_SVC_YIELD
+    beq .Lsvc_yield
+
+    b .Lsvc_invalid
+
+
+.Lsvc_start_first:
+    bl fr_scheduler_current_saved_sp
+    b .Lsvc_restore
+
+
+.Lsvc_yield:
+    mrs r0, psp
+    stmdb r0!, {r4-r11}
+
+    bl fr_scheduler_yield_from_isr
+
+    b .Lsvc_restore
+
+
+.Lsvc_restore:
+    cbz r0, .Lsvc_invalid
 
     ldmia r0!, {r4-r11}
     msr psp, r0
@@ -62,9 +110,12 @@ SVC_Handler:
     ldr lr, =0xFFFFFFFD
     bx lr
 
-1:
+
+.Lsvc_invalid:
     udf #2
-    b 1b
+
+.Lsvc_invalid_loop:
+    b .Lsvc_invalid_loop
 
 .size SVC_Handler, .-SVC_Handler
 

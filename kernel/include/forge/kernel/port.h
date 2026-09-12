@@ -8,5 +8,6 @@
 uint32_t *fr_port_task_stack_init(uint32_t *stack_top, fr_task_entry_t entry, void *argument);
 
 _Noreturn void fr_port_start_first_task(void);
+void fr_port_yield(void);
 
 #endif

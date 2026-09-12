@@ -55,4 +55,6 @@ fr_task_status_t fr_task_create(fr_task_handle_t *out_task, const fr_task_config
 uint32_t fr_task_count(void);
 bool fr_task_get_info(fr_task_handle_t task, fr_task_info_t *out_info);
 
+void fr_task_yield(void);
+
 #endif

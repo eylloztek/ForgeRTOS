@@ -4,5 +4,6 @@
 #include <stdint.h>
 
 uint32_t *fr_scheduler_current_saved_sp(void);
+uint32_t *fr_scheduler_yield_from_isr(uint32_t *current_saved_sp);
 
 #endif

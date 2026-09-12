@@ -18,6 +18,7 @@
 #define FR_DEMO_TASK_A_STACK_WORDS        128u
 #define FR_DEMO_TASK_B_STACK_WORDS        96u
 
+#define FR_DEMO_YIELD_MASK                0x00003FFFu
 #define FR_DEMO_SCHEDULER_NOT_RETURNED    0xFFu
 
 _Alignas(8) uint32_t g_fr_demo_bootstrap_stack[FR_DEMO_BOOTSTRAP_STACK_WORDS];
@@ -32,7 +33,6 @@ fr_task_handle_t g_fr_demo_task_b;
 
 fr_task_info_t g_fr_demo_task_a_info;
 fr_task_info_t g_fr_demo_task_b_info;
-fr_task_info_t g_fr_demo_running_task_info;
 
 fr_task_status_t g_fr_demo_task_a_status;
 fr_task_status_t g_fr_demo_task_b_status;
@@ -43,10 +43,14 @@ volatile uint32_t g_fr_demo_task_b_started;
 volatile uint32_t g_fr_demo_task_a_iterations;
 volatile uint32_t g_fr_demo_task_b_iterations;
 
+volatile uint32_t g_fr_demo_task_a_yields;
+volatile uint32_t g_fr_demo_task_b_yields;
+
+volatile uint32_t g_fr_demo_task_a_resumes;
+volatile uint32_t g_fr_demo_task_b_resumes;
+
 volatile uint32_t g_fr_demo_task_a_argument_value;
 volatile uint32_t g_fr_demo_task_b_argument_value;
-
-fr_task_handle_t g_fr_demo_current_task_snapshot;
 
 uint32_t g_fr_demo_task_count_snapshot;
 
@@ -66,28 +70,30 @@ static void fr_demo_prepare_bootstrap_stack(void) {
 
 static void fr_demo_task_a_entry(void *argument) {
     g_fr_demo_task_a_started = 1u;
-    g_fr_demo_current_task_snapshot = fr_scheduler_current_task();
 
     if (argument != NULL) {
         g_fr_demo_task_a_argument_value = *(const uint32_t *)argument;
     }
 
-    (void)fr_task_get_info(g_fr_demo_current_task_snapshot, &g_fr_demo_running_task_info);
-
     while (1) {
         ++g_fr_demo_task_a_iterations;
+
+        if ((g_fr_demo_task_a_iterations & FR_DEMO_YIELD_MASK) == 0u) {
+            ++g_fr_demo_task_a_yields;
+
+            fr_task_yield();
+
+            ++g_fr_demo_task_a_resumes;
+        }
     }
 }
 
 static void fr_demo_task_b_entry(void *argument) {
     g_fr_demo_task_b_started = 1u;
-    g_fr_demo_current_task_snapshot = fr_scheduler_current_task();
 
     if (argument != NULL) {
         g_fr_demo_task_b_argument_value = *(const uint32_t *)argument;
     }
-
-    (void)fr_task_get_info(g_fr_demo_current_task_snapshot, &g_fr_demo_running_task_info);
 
     fr_tick_t last_toggle_tick = fr_tick_now();
 
@@ -99,6 +105,14 @@ static void fr_demo_task_b_entry(void *argument) {
         if (fr_tick_elapsed(last_toggle_tick, now) >= FR_DEMO_LED_TOGGLE_TICKS) {
             last_toggle_tick += FR_DEMO_LED_TOGGLE_TICKS;
             fr_board_led_toggle();
+        }
+
+        if ((g_fr_demo_task_b_iterations & FR_DEMO_YIELD_MASK) == 0u) {
+            ++g_fr_demo_task_b_yields;
+
+            fr_task_yield();
+
+            ++g_fr_demo_task_b_resumes;
         }
     }
 }
