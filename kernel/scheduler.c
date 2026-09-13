@@ -47,6 +47,8 @@ fr_scheduler_status_t fr_scheduler_start(void) {
         return FR_SCHEDULER_ERROR_NO_READY_TASK;
     }
 
+    fr_port_scheduler_init();
+
     first_task->state = FR_TASK_STATE_RUNNING;
 
     g_fr_scheduler_current_task = first_task;
@@ -75,7 +77,7 @@ uint32_t *fr_scheduler_current_saved_sp(void) {
     return current_task->saved_sp;
 }
 
-uint32_t *fr_scheduler_yield_from_isr(uint32_t *current_saved_sp) {
+uint32_t *fr_scheduler_switch_from_isr(uint32_t *current_saved_sp) {
     if (current_saved_sp == NULL) {
         return NULL;
     }

@@ -17,7 +17,7 @@ Rather than relying on an existing RTOS or CMSIS-RTOS layer, ForgeRTOS implement
 - ~~Initialize synthetic Cortex-M4 task contexts with software-saved registers and hardware exception frames.~~
 - ~~Add the first cooperative scheduler and start the highest-priority READY task through SVC exception return.~~
 - ~~Implement cooperative task yielding and full task-to-task context switching.~~
-- Move context switching from SVC to PendSV.
+- ~~Move context switching from SVC to PendSV.~~
 - Preserve and restore R4-R11 through the PendSV context-switch path.
 - Validate repeated task context switching and register preservation under stress.
 - Enable preemptive scheduling using SysTick and PendSV.

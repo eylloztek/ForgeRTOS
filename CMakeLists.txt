@@ -18,6 +18,7 @@ add_executable(${TARGET}
     port/cortex_m4/cortex_m4.c
     port/cortex_m4/critical.c
     port/cortex_m4/fault.c
+    port/cortex_m4/pendsv.c
     port/cortex_m4/systick.c
     port/cortex_m4/task_context.c
     port/cortex_m4/portasm.S
