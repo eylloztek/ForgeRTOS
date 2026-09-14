@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "forge/arch/context_probe.h"
 #include "forge/arch/cortex_m4.h"
 #include "forge/arch/fault.h"
 #include "forge/arch/systick.h"
@@ -28,6 +29,28 @@ _Alignas(8) uint32_t g_fr_demo_task_b_stack[FR_DEMO_TASK_B_STACK_WORDS];
 uint32_t g_fr_demo_task_a_argument = 0xA1A1A1A1u;
 uint32_t g_fr_demo_task_b_argument = 0xB2B2B2B2u;
 
+static const fr_arch_context_pattern_t g_fr_demo_task_a_context_pattern = {
+    .r4 = 0xA4A4A4A4u,
+    .r5 = 0xA5A5A5A5u,
+    .r6 = 0xA6A6A6A6u,
+    .r7 = 0xA7A7A7A7u,
+    .r8 = 0xA8A8A8A8u,
+    .r9 = 0xA9A9A9A9u,
+    .r10 = 0xAAAAAAAAu,
+    .r11 = 0xABABABABu
+};
+
+static const fr_arch_context_pattern_t g_fr_demo_task_b_context_pattern = {
+    .r4 = 0xB4B4B4B4u,
+    .r5 = 0xB5B5B5B5u,
+    .r6 = 0xB6B6B6B6u,
+    .r7 = 0xB7B7B7B7u,
+    .r8 = 0xB8B8B8B8u,
+    .r9 = 0xB9B9B9B9u,
+    .r10 = 0xBABABABAu,
+    .r11 = 0xBBBBBBBBu
+};
+
 fr_task_handle_t g_fr_demo_task_a;
 fr_task_handle_t g_fr_demo_task_b;
 
@@ -51,6 +74,12 @@ volatile uint32_t g_fr_demo_task_b_resumes;
 
 volatile uint32_t g_fr_demo_task_a_argument_value;
 volatile uint32_t g_fr_demo_task_b_argument_value;
+
+volatile uint32_t g_fr_demo_task_a_context_checks;
+volatile uint32_t g_fr_demo_task_b_context_checks;
+
+volatile uint32_t g_fr_demo_task_a_context_failures;
+volatile uint32_t g_fr_demo_task_b_context_failures;
 
 uint32_t g_fr_demo_task_count_snapshot;
 
@@ -81,9 +110,15 @@ static void fr_demo_task_a_entry(void *argument) {
         if ((g_fr_demo_task_a_iterations & FR_DEMO_YIELD_MASK) == 0u) {
             ++g_fr_demo_task_a_yields;
 
-            fr_task_yield();
+            const bool context_valid =
+                fr_arch_context_probe_yield(&g_fr_demo_task_a_context_pattern);
 
             ++g_fr_demo_task_a_resumes;
+            ++g_fr_demo_task_a_context_checks;
+
+            if (!context_valid) {
+                ++g_fr_demo_task_a_context_failures;
+            }
         }
     }
 }
@@ -110,9 +145,15 @@ static void fr_demo_task_b_entry(void *argument) {
         if ((g_fr_demo_task_b_iterations & FR_DEMO_YIELD_MASK) == 0u) {
             ++g_fr_demo_task_b_yields;
 
-            fr_task_yield();
+            const bool context_valid =
+                fr_arch_context_probe_yield(&g_fr_demo_task_b_context_pattern);
 
             ++g_fr_demo_task_b_resumes;
+            ++g_fr_demo_task_b_context_checks;
+
+            if (!context_valid) {
+                ++g_fr_demo_task_b_context_failures;
+            }
         }
     }
 }

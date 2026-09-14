@@ -15,6 +15,7 @@ add_executable(${TARGET}
     kernel/scheduler.c
     kernel/task.c
     kernel/tick.c
+    port/cortex_m4/context_probe.S
     port/cortex_m4/cortex_m4.c
     port/cortex_m4/critical.c
     port/cortex_m4/fault.c
