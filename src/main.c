@@ -22,6 +22,12 @@
 #define FR_DEMO_YIELD_MASK                0x00003FFFu
 #define FR_DEMO_SCHEDULER_NOT_RETURNED    0xFFu
 
+#define FR_DEMO_TURN_TASK_A                1u
+#define FR_DEMO_TURN_TASK_B                2u
+
+#define FR_DEMO_TASK_A_LOCAL_STATE_SEED    0x13579BDFu
+#define FR_DEMO_TASK_B_LOCAL_STATE_SEED    0x2468ACE0u
+
 _Alignas(8) uint32_t g_fr_demo_bootstrap_stack[FR_DEMO_BOOTSTRAP_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_a_stack[FR_DEMO_TASK_A_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_b_stack[FR_DEMO_TASK_B_STACK_WORDS];
@@ -50,6 +56,15 @@ static const fr_arch_context_pattern_t g_fr_demo_task_b_context_pattern = {
     .r10 = 0xBABABABAu,
     .r11 = 0xBBBBBBBBu
 };
+
+typedef struct {
+    uint32_t rounds;
+    uint32_t execution_errors;
+    uint32_t stack_errors;
+    uint32_t sequence_errors;
+    uint32_t local_state_errors;
+    uint32_t local_state_snapshot;
+} fr_demo_context_stress_stats_t;
 
 fr_task_handle_t g_fr_demo_task_a;
 fr_task_handle_t g_fr_demo_task_b;
@@ -81,6 +96,11 @@ volatile uint32_t g_fr_demo_task_b_context_checks;
 volatile uint32_t g_fr_demo_task_a_context_failures;
 volatile uint32_t g_fr_demo_task_b_context_failures;
 
+volatile fr_demo_context_stress_stats_t g_fr_demo_task_a_stress;
+volatile fr_demo_context_stress_stats_t g_fr_demo_task_b_stress;
+
+volatile uint32_t g_fr_demo_expected_turn = FR_DEMO_TURN_TASK_B;
+
 uint32_t g_fr_demo_task_count_snapshot;
 
 volatile fr_scheduler_status_t g_fr_demo_scheduler_return_status =
@@ -97,7 +117,70 @@ static void fr_demo_prepare_bootstrap_stack(void) {
     }
 }
 
+
+static uint32_t fr_demo_advance_local_state(uint32_t state) {
+    return (state * 1664525u) + 1013904223u;
+}
+
+
+static bool fr_demo_execution_context_is_valid(fr_task_handle_t expected_task,
+                                                const fr_task_info_t *task_info) {
+    volatile fr_arch_stack_state_t state;
+
+    fr_arch_capture_stack_state(&state);
+
+    if (fr_scheduler_current_task() != expected_task) {
+        return false;
+    }
+
+    if (state.ipsr != 0u) {
+        return false;
+    }
+
+    if ((state.control & 0x2u) == 0u) {
+        return false;
+    }
+
+    if (state.sp != state.psp) {
+        return false;
+    }
+
+    const uintptr_t stack_pointer = (uintptr_t)state.sp;
+
+    if ((stack_pointer < task_info->stack_base) ||
+        (stack_pointer > task_info->stack_top)) {
+        return false;
+    }
+
+    if ((stack_pointer & 0x7u) != 0u) {
+        return false;
+    }
+
+    return true;
+}
+
+
+static bool fr_demo_stack_probe_is_valid(const volatile uint32_t *probe,
+                                         uint32_t word0,
+                                         uint32_t word1,
+                                         uint32_t word2,
+                                         uint32_t word3) {
+    return (probe[0] == word0) &&
+           (probe[1] == word1) &&
+           (probe[2] == word2) &&
+           (probe[3] == word3);
+}
+
 static void fr_demo_task_a_entry(void *argument) {
+    volatile uint32_t local_state = FR_DEMO_TASK_A_LOCAL_STATE_SEED;
+
+    volatile uint32_t stack_probe[4] = {
+        0xA0A0A0A0u,
+        0xA1A1A1A1u,
+        0xA2A2A2A2u,
+        0xA3A3A3A3u
+    };
+
     g_fr_demo_task_a_started = 1u;
 
     if (argument != NULL) {
@@ -107,23 +190,71 @@ static void fr_demo_task_a_entry(void *argument) {
     while (1) {
         ++g_fr_demo_task_a_iterations;
 
+        local_state = fr_demo_advance_local_state(local_state);
+
         if ((g_fr_demo_task_a_iterations & FR_DEMO_YIELD_MASK) == 0u) {
             ++g_fr_demo_task_a_yields;
 
-            const bool context_valid =
+            if (!fr_demo_execution_context_is_valid(g_fr_demo_task_a,
+                                                     &g_fr_demo_task_a_info)) {
+                ++g_fr_demo_task_a_stress.execution_errors;
+            }
+
+            if (g_fr_demo_expected_turn != FR_DEMO_TURN_TASK_A) {
+                ++g_fr_demo_task_a_stress.sequence_errors;
+            }
+
+            g_fr_demo_expected_turn = FR_DEMO_TURN_TASK_B;
+
+            const uint32_t local_state_before_yield = local_state;
+
+            const bool register_context_valid =
                 fr_arch_context_probe_yield(&g_fr_demo_task_a_context_pattern);
 
             ++g_fr_demo_task_a_resumes;
             ++g_fr_demo_task_a_context_checks;
 
-            if (!context_valid) {
+            if (!register_context_valid) {
                 ++g_fr_demo_task_a_context_failures;
             }
+
+            if ((uint32_t)local_state != local_state_before_yield) {
+                ++g_fr_demo_task_a_stress.local_state_errors;
+            }
+
+            if (!fr_demo_stack_probe_is_valid(stack_probe,
+                                              0xA0A0A0A0u,
+                                              0xA1A1A1A1u,
+                                              0xA2A2A2A2u,
+                                              0xA3A3A3A3u)) {
+                ++g_fr_demo_task_a_stress.stack_errors;
+            }
+
+            if (g_fr_demo_expected_turn != FR_DEMO_TURN_TASK_A) {
+                ++g_fr_demo_task_a_stress.sequence_errors;
+            }
+
+            if (!fr_demo_execution_context_is_valid(g_fr_demo_task_a,
+                                                     &g_fr_demo_task_a_info)) {
+                ++g_fr_demo_task_a_stress.execution_errors;
+            }
+
+            g_fr_demo_task_a_stress.local_state_snapshot = local_state;
+            ++g_fr_demo_task_a_stress.rounds;
         }
     }
 }
 
 static void fr_demo_task_b_entry(void *argument) {
+    volatile uint32_t local_state = FR_DEMO_TASK_B_LOCAL_STATE_SEED;
+
+    volatile uint32_t stack_probe[4] = {
+        0xB0B0B0B0u,
+        0xB1B1B1B1u,
+        0xB2B2B2B2u,
+        0xB3B3B3B3u
+    };
+
     g_fr_demo_task_b_started = 1u;
 
     if (argument != NULL) {
@@ -135,6 +266,8 @@ static void fr_demo_task_b_entry(void *argument) {
     while (1) {
         ++g_fr_demo_task_b_iterations;
 
+        local_state = fr_demo_advance_local_state(local_state);
+
         const fr_tick_t now = fr_tick_now();
 
         if (fr_tick_elapsed(last_toggle_tick, now) >= FR_DEMO_LED_TOGGLE_TICKS) {
@@ -145,15 +278,52 @@ static void fr_demo_task_b_entry(void *argument) {
         if ((g_fr_demo_task_b_iterations & FR_DEMO_YIELD_MASK) == 0u) {
             ++g_fr_demo_task_b_yields;
 
-            const bool context_valid =
+            if (!fr_demo_execution_context_is_valid(g_fr_demo_task_b,
+                                                     &g_fr_demo_task_b_info)) {
+                ++g_fr_demo_task_b_stress.execution_errors;
+            }
+
+            if (g_fr_demo_expected_turn != FR_DEMO_TURN_TASK_B) {
+                ++g_fr_demo_task_b_stress.sequence_errors;
+            }
+
+            g_fr_demo_expected_turn = FR_DEMO_TURN_TASK_A;
+
+            const uint32_t local_state_before_yield = local_state;
+
+            const bool register_context_valid =
                 fr_arch_context_probe_yield(&g_fr_demo_task_b_context_pattern);
 
             ++g_fr_demo_task_b_resumes;
             ++g_fr_demo_task_b_context_checks;
 
-            if (!context_valid) {
+            if (!register_context_valid) {
                 ++g_fr_demo_task_b_context_failures;
             }
+
+            if ((uint32_t)local_state != local_state_before_yield) {
+                ++g_fr_demo_task_b_stress.local_state_errors;
+            }
+
+            if (!fr_demo_stack_probe_is_valid(stack_probe,
+                                              0xB0B0B0B0u,
+                                              0xB1B1B1B1u,
+                                              0xB2B2B2B2u,
+                                              0xB3B3B3B3u)) {
+                ++g_fr_demo_task_b_stress.stack_errors;
+            }
+
+            if (g_fr_demo_expected_turn != FR_DEMO_TURN_TASK_B) {
+                ++g_fr_demo_task_b_stress.sequence_errors;
+            }
+
+            if (!fr_demo_execution_context_is_valid(g_fr_demo_task_b,
+                                                     &g_fr_demo_task_b_info)) {
+                ++g_fr_demo_task_b_stress.execution_errors;
+            }
+
+            g_fr_demo_task_b_stress.local_state_snapshot = local_state;
+            ++g_fr_demo_task_b_stress.rounds;
         }
     }
 }
