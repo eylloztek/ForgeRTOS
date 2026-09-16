@@ -1,4 +1,5 @@
 #include "forge/arch/systick.h"
+#include "forge/kernel/scheduler_internal.h"
 #include "forge/kernel/tick_internal.h"
 
 #include "port_internal.h"
@@ -65,4 +66,5 @@ bool fr_systick_init(uint32_t core_clock_hz, uint32_t tick_hz) {
 
 void SysTick_Handler(void) {
     fr_kernel_tick_isr();
+    fr_scheduler_tick_isr();
 }

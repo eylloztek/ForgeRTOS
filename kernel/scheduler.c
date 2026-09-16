@@ -67,6 +67,14 @@ fr_task_handle_t fr_scheduler_current_task(void) {
     return g_fr_scheduler_current_task;
 }
 
+void fr_scheduler_tick_isr(void) {
+    if ((!g_fr_scheduler_running) || (g_fr_scheduler_current_task == NULL)) {
+        return;
+    }
+
+    fr_port_request_context_switch();
+}
+
 uint32_t *fr_scheduler_current_saved_sp(void) {
     fr_task_t *const current_task = g_fr_scheduler_current_task;
 

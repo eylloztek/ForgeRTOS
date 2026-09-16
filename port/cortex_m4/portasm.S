@@ -5,9 +5,7 @@
 .equ FR_SVC_START_FIRST_TASK, 0
 .equ FR_SVC_YIELD,            1
 
-.equ FR_SCB_ICSR,             0xE000ED04
-.equ FR_ICSR_PENDSVSET,       0x10000000
-
+.extern fr_port_request_context_switch
 .extern fr_scheduler_current_saved_sp
 .extern fr_scheduler_switch_from_isr
 .extern fr_fault_handle_c
@@ -103,12 +101,11 @@ SVC_Handler:
 
 
 .Lsvc_request_yield:
-    ldr r0, =FR_SCB_ICSR
-    ldr r1, =FR_ICSR_PENDSVSET
-    str r1, [r0]
+    push {r3, lr}
 
-    dsb
-    isb
+    bl fr_port_request_context_switch
+
+    pop {r3, lr}
 
     bx lr
 
