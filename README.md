@@ -21,7 +21,7 @@ Rather than relying on an existing RTOS or CMSIS-RTOS layer, ForgeRTOS implement
 - ~~Preserve and restore R4-R11 through the PendSV context-switch path.~~
 - ~~Validate repeated task context switching and register preservation under stress.~~
 - ~~Enable preemptive scheduling using SysTick and PendSV.~~
-- Implement fixed-priority scheduling.
+- ~~Implement fixed-priority scheduling.~~
 - Add round-robin scheduling for tasks with equal priority.
 - Add an idle task and defined CPU idle behavior.
 - Implement task sleeping and the BLOCKED state.

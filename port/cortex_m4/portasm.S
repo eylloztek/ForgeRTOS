@@ -84,9 +84,12 @@ SVC_Handler:
 
 
 .Lsvc_start_first:
-    bl fr_scheduler_current_saved_sp
+    ldr r4, [r0]
 
+    bl fr_scheduler_current_saved_sp
     cbz r0, .Lsvc_invalid
+
+    mov r2, r4
 
     ldmia r0!, {r4-r11}
     msr psp, r0
@@ -94,6 +97,10 @@ SVC_Handler:
     mrs r1, control
     orr r1, r1, #2
     msr control, r1
+    isb
+
+    msr basepri, r2
+    dsb
     isb
 
     ldr lr, =0xFFFFFFFD

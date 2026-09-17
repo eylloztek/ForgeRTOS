@@ -27,6 +27,14 @@
 #define FR_DEMO_TASK_A_LOCAL_STATE_SEED    0x13579BDFu
 #define FR_DEMO_TASK_B_LOCAL_STATE_SEED    0x2468ACE0u
 
+#ifndef FR_DEMO_TASK_A_PRIORITY
+#define FR_DEMO_TASK_A_PRIORITY 3u
+#endif
+
+#ifndef FR_DEMO_TASK_B_PRIORITY
+#define FR_DEMO_TASK_B_PRIORITY 7u
+#endif
+
 _Alignas(8) uint32_t g_fr_demo_bootstrap_stack[FR_DEMO_BOOTSTRAP_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_a_stack[FR_DEMO_TASK_A_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_b_stack[FR_DEMO_TASK_B_STACK_WORDS];
@@ -243,7 +251,7 @@ static bool fr_demo_create_tasks(void) {
         .argument = &g_fr_demo_task_a_argument,
         .stack_memory = g_fr_demo_task_a_stack,
         .stack_size_words = FR_DEMO_TASK_A_STACK_WORDS,
-        .priority = 3u
+        .priority = FR_DEMO_TASK_A_PRIORITY
     };
 
     const fr_task_config_t task_b_config = {
@@ -251,7 +259,7 @@ static bool fr_demo_create_tasks(void) {
         .argument = &g_fr_demo_task_b_argument,
         .stack_memory = g_fr_demo_task_b_stack,
         .stack_size_words = FR_DEMO_TASK_B_STACK_WORDS,
-        .priority = 7u
+        .priority = FR_DEMO_TASK_B_PRIORITY
     };
 
     g_fr_demo_task_a_status = fr_task_create(&g_fr_demo_task_a, &task_a_config);
