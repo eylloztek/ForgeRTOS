@@ -17,4 +17,6 @@
 #define FR_CONFIG_MIN_TASK_STACK_WORDS 32u
 #endif
 
+#define FR_CONFIG_IDLE_STACK_WORDS 128u
+
 #endif

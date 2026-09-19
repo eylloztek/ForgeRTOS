@@ -23,7 +23,7 @@ Rather than relying on an existing RTOS or CMSIS-RTOS layer, ForgeRTOS implement
 - ~~Enable preemptive scheduling using SysTick and PendSV.~~
 - ~~Implement fixed-priority scheduling.~~
 - ~~Add round-robin scheduling for tasks with equal priority.~~
-- Add an idle task and defined CPU idle behavior.
+- ~~Add an idle task and defined CPU idle behavior.~~
 - Implement task sleeping and the BLOCKED state.
 - Add timeout and wake-up management for blocked tasks.
 - Implement binary semaphores.

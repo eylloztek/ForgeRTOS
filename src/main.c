@@ -35,6 +35,10 @@
 #define FR_DEMO_TASK_B_PRIORITY 7u
 #endif
 
+#ifndef FR_DEMO_IDLE_ONLY
+#define FR_DEMO_IDLE_ONLY 0u
+#endif
+
 _Alignas(8) uint32_t g_fr_demo_bootstrap_stack[FR_DEMO_BOOTSTRAP_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_a_stack[FR_DEMO_TASK_A_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_b_stack[FR_DEMO_TASK_B_STACK_WORDS];
@@ -292,7 +296,7 @@ static _Noreturn void fr_bootstrap_entry(void) {
         }
     }
 
-    if (!fr_demo_create_tasks()) {
+    if ((FR_DEMO_IDLE_ONLY == 0u) && !fr_demo_create_tasks()) {
         while (1) {
         }
     }
