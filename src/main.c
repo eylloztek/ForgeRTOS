@@ -103,6 +103,11 @@ volatile uint32_t g_fr_demo_task_b_sleep_calls;
 volatile uint32_t g_fr_demo_task_b_wakeups;
 volatile uint32_t g_fr_demo_task_b_sleep_errors;
 
+volatile uint32_t g_fr_demo_timeout_math_failures;
+
+volatile uint32_t g_fr_demo_task_a_last_sleep_elapsed;
+volatile uint32_t g_fr_demo_task_b_last_sleep_elapsed;
+
 uint32_t g_fr_demo_task_count_snapshot;
 
 volatile fr_scheduler_status_t g_fr_demo_scheduler_return_status =
@@ -185,6 +190,36 @@ static void fr_demo_validate_preempted_task(fr_task_handle_t task,
     ++stats->validations;
 }
 
+static uint32_t fr_demo_test_timeout_math(void) {
+    uint32_t failures = 0u;
+
+    if (fr_tick_deadline_reached(99u, 100u)) {
+        ++failures;
+    }
+
+    if (!fr_tick_deadline_reached(100u, 100u)) {
+        ++failures;
+    }
+
+    if (fr_tick_deadline_reached(0xFFFFFFFEu, 0x00000003u)) {
+        ++failures;
+    }
+
+    if (fr_tick_deadline_reached(0x00000002u, 0x00000003u)) {
+        ++failures;
+    }
+
+    if (!fr_tick_deadline_reached(0x00000003u, 0x00000003u)) {
+        ++failures;
+    }
+
+    if (!fr_tick_deadline_reached(0x00000004u, 0x00000003u)) {
+        ++failures;
+    }
+
+    return failures;
+}
+
 static void fr_demo_task_a_entry(void *argument) {
     volatile uint32_t local_state = FR_DEMO_TASK_A_LOCAL_STATE_SEED;
 
@@ -220,6 +255,23 @@ static void fr_demo_task_a_entry(void *argument) {
         if (fr_task_sleep(FR_DEMO_TASK_A_SLEEP_TICKS)) {
             ++g_fr_demo_task_a_wakeups;
         }else {
+            ++g_fr_demo_task_a_sleep_errors;
+        }
+
+        const fr_tick_t sleep_start = fr_tick_now();
+
+        ++g_fr_demo_task_a_sleep_calls;
+
+        if (fr_task_sleep(FR_DEMO_TASK_A_SLEEP_TICKS)) {
+            ++g_fr_demo_task_a_wakeups;
+
+            g_fr_demo_task_a_last_sleep_elapsed =
+                fr_tick_elapsed(sleep_start, fr_tick_now());
+
+            if (g_fr_demo_task_a_last_sleep_elapsed < FR_DEMO_TASK_A_SLEEP_TICKS) {
+                ++g_fr_demo_task_a_sleep_errors;
+            }
+        } else {
             ++g_fr_demo_task_a_sleep_errors;
         }
     }
@@ -271,6 +323,23 @@ static void fr_demo_task_b_entry(void *argument) {
         } else {
             ++g_fr_demo_task_b_sleep_errors;
         }
+
+        const fr_tick_t sleep_start = fr_tick_now();
+
+        ++g_fr_demo_task_b_sleep_calls;
+
+        if (fr_task_sleep(FR_DEMO_TASK_B_SLEEP_TICKS)) {
+            ++g_fr_demo_task_b_wakeups;
+
+            g_fr_demo_task_b_last_sleep_elapsed =
+                fr_tick_elapsed(sleep_start, fr_tick_now());
+
+            if (g_fr_demo_task_b_last_sleep_elapsed < FR_DEMO_TASK_B_SLEEP_TICKS) {
+                ++g_fr_demo_task_b_sleep_errors;
+            }
+        } else {
+            ++g_fr_demo_task_b_sleep_errors;
+        }
     }
 }
 
@@ -315,6 +384,8 @@ static bool fr_demo_create_tasks(void) {
 static _Noreturn void fr_bootstrap_entry(void) {
     fr_fault_init();
     fr_board_init();
+
+    g_fr_demo_timeout_math_failures = fr_demo_test_timeout_math();
 
     if (!fr_systick_init(FR_BOARD_RESET_CORE_CLOCK_HZ, FR_DEMO_TICK_HZ)) {
         while (1) {

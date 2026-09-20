@@ -4,6 +4,7 @@
 
 #include "forge/config.h"
 #include "forge/tick.h"
+#include "forge/kernel/wait_internal.h"
 #include "forge/critical.h"
 #include "forge/kernel/port.h"
 #include "forge/kernel/scheduler_internal.h"
@@ -27,6 +28,11 @@ static volatile uint32_t g_fr_scheduler_context_switch_count;
 /* Debug counters; not part of the public scheduler API. */
 volatile uint32_t g_fr_scheduler_idle_entry_count;
 volatile uint32_t g_fr_scheduler_idle_iterations;
+
+volatile uint32_t g_fr_scheduler_timeout_count;
+volatile uint32_t g_fr_scheduler_last_timeout_task_id;
+volatile uint32_t g_fr_scheduler_last_timeout_tick;
+volatile uint32_t g_fr_scheduler_last_timeout_deadline;
 
 static void fr_scheduler_idle_entry(void *argument) {
     (void)argument;
@@ -64,8 +70,10 @@ static void fr_scheduler_initialize_idle(void) {
                                              idle->entry,
                                              idle->argument);
 
-    idle->wake_tick = 0u;
-    idle->sleep_active = false;
+    idle->wait_deadline = 0u;
+    idle->wait_reason = FR_WAIT_REASON_NONE;
+    idle->wait_result = FR_WAIT_RESULT_PENDING;
+    idle->wait_has_deadline = false;
 
     idle->state = FR_TASK_STATE_READY;
 }
@@ -172,6 +180,11 @@ fr_scheduler_status_t fr_scheduler_start(void) {
     g_fr_scheduler_context_switch_count = 0u;
     g_fr_scheduler_running = true;
 
+    g_fr_scheduler_timeout_count = 0u;
+    g_fr_scheduler_last_timeout_task_id = 0u;
+    g_fr_scheduler_last_timeout_tick = 0u;
+    g_fr_scheduler_last_timeout_deadline = 0u;
+
     fr_port_start_first_task(critical_state);
 }
 
@@ -188,7 +201,7 @@ fr_task_handle_t fr_scheduler_current_task(void) {
     return (current_task == &g_fr_scheduler_idle_task) ? NULL : current_task;
 }
 
-static void fr_scheduler_wake_sleeping_tasks(uint32_t now) {
+static void fr_scheduler_expire_timeouts(uint32_t now) {
     const uint32_t task_count = fr_task_internal_count();
 
     for (uint32_t i = 0u; i < task_count; ++i) {
@@ -196,20 +209,21 @@ static void fr_scheduler_wake_sleeping_tasks(uint32_t now) {
 
         if ((task == NULL) ||
             (task->state != FR_TASK_STATE_BLOCKED) ||
-            !task->sleep_active) {
+            !task->wait_has_deadline) {
             continue;
         }
 
-        if ((uint32_t)(now - task->wake_tick) > FR_TASK_SLEEP_MAX_TICKS) {
+        if (!fr_tick_deadline_reached(now, task->wait_deadline)) {
             continue;
         }
 
-        task->sleep_active = false;
+        const uint32_t deadline = task->wait_deadline;
 
-        if (task == g_fr_scheduler_current_task) {
-            task->state = FR_TASK_STATE_RUNNING;
-        } else {
-            task->state = FR_TASK_STATE_READY;
+        if (fr_scheduler_unblock_task_locked(task, FR_WAIT_RESULT_TIMEOUT)) {
+            ++g_fr_scheduler_timeout_count;
+            g_fr_scheduler_last_timeout_task_id = task->id;
+            g_fr_scheduler_last_timeout_tick = now;
+            g_fr_scheduler_last_timeout_deadline = deadline;
         }
     }
 }
@@ -219,7 +233,7 @@ void fr_scheduler_tick_isr(void) {
         return;
     }
 
-    fr_scheduler_wake_sleeping_tasks(fr_tick_now());
+    fr_scheduler_expire_timeouts(fr_tick_now());
 
     fr_task_t *const current_task = g_fr_scheduler_current_task;
 
@@ -302,6 +316,64 @@ void fr_task_yield(void) {
     }
 }
 
+bool fr_scheduler_block_current_locked(fr_wait_reason_t reason,
+                                       uint32_t timeout_ticks) {
+    if ((reason == FR_WAIT_REASON_NONE) ||
+        (timeout_ticks == 0u) ||
+        ((timeout_ticks > FR_WAIT_MAX_FINITE_TICKS) &&
+         (timeout_ticks != FR_WAIT_FOREVER))) {
+        return false;
+    }
+
+    fr_task_t *const current_task = g_fr_scheduler_current_task;
+
+    if (!g_fr_scheduler_running ||
+        (current_task == NULL) ||
+        (current_task == &g_fr_scheduler_idle_task) ||
+        (current_task->state != FR_TASK_STATE_RUNNING)) {
+        return false;
+    }
+
+    current_task->wait_reason = reason;
+    current_task->wait_result = FR_WAIT_RESULT_PENDING;
+
+    if (timeout_ticks == FR_WAIT_FOREVER) {
+        current_task->wait_has_deadline = false;
+        current_task->wait_deadline = 0u;
+    } else {
+        current_task->wait_has_deadline = true;
+        current_task->wait_deadline = fr_tick_now() + timeout_ticks;
+    }
+
+    current_task->state = FR_TASK_STATE_BLOCKED;
+    fr_port_request_context_switch();
+
+    return true;
+}
+
+bool fr_scheduler_unblock_task_locked(fr_task_t *task,
+                                     fr_wait_result_t result) {
+    if ((task == NULL) ||
+        (task->state != FR_TASK_STATE_BLOCKED) ||
+        (task->wait_reason == FR_WAIT_REASON_NONE) ||
+        (result == FR_WAIT_RESULT_PENDING)) {
+        return false;
+    }
+
+    task->wait_result = result;
+    task->wait_reason = FR_WAIT_REASON_NONE;
+    task->wait_has_deadline = false;
+    task->wait_deadline = 0u;
+
+    if (task == g_fr_scheduler_current_task) {
+        task->state = FR_TASK_STATE_RUNNING;
+    } else {
+        task->state = FR_TASK_STATE_READY;
+    }
+
+    return true;
+}
+
 bool fr_task_sleep(uint32_t delay_ticks) {
     if ((delay_ticks == 0u) || (delay_ticks > FR_TASK_SLEEP_MAX_TICKS)) {
         return false;
@@ -309,11 +381,15 @@ bool fr_task_sleep(uint32_t delay_ticks) {
 
     uint32_t ipsr;
     uint32_t primask;
+    uint32_t faultmask;
 
     __asm volatile("mrs %0, ipsr" : "=r"(ipsr));
     __asm volatile("mrs %0, primask" : "=r"(primask));
+    __asm volatile("mrs %0, faultmask" : "=r"(faultmask));
 
-    if ((ipsr != 0u) || ((primask & 1u) != 0u)) {
+    if ((ipsr != 0u) ||
+        ((primask & 1u) != 0u) ||
+        ((faultmask & 1u) != 0u)) {
         return false;
     }
 
@@ -329,12 +405,11 @@ bool fr_task_sleep(uint32_t delay_ticks) {
         return false;
     }
 
-    current_task->wake_tick = fr_tick_now() + delay_ticks;
-    current_task->sleep_active = true;
-    current_task->state = FR_TASK_STATE_BLOCKED;
+    const bool blocked =
+        fr_scheduler_block_current_locked(FR_WAIT_REASON_SLEEP, delay_ticks);
 
-    fr_port_request_context_switch();
     fr_critical_exit(critical_state);
 
-    return true;
+    return blocked &&
+           (current_task->wait_result == FR_WAIT_RESULT_TIMEOUT);
 }

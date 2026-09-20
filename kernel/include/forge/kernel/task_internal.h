@@ -5,6 +5,7 @@
 #include <stdbool.h>
 
 #include "forge/task.h"
+#include "forge/kernel/wait_internal.h"
 
 struct fr_task {
     uint32_t *saved_sp;
@@ -22,8 +23,10 @@ struct fr_task {
     fr_task_priority_t base_priority;
     fr_task_state_t state;
 
-    uint32_t wake_tick;
-    bool sleep_active;
+    uint32_t wait_deadline;
+    fr_wait_reason_t wait_reason;
+    volatile fr_wait_result_t wait_result;
+    bool wait_has_deadline;
 };
 
 uint32_t fr_task_internal_count(void);

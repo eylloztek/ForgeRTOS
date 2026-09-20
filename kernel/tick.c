@@ -19,3 +19,7 @@ bool fr_tick_has_elapsed(fr_tick_t start, fr_tick_t duration) {
 void fr_kernel_tick_isr(void) {
     ++g_fr_kernel_tick_count;
 }
+
+bool fr_tick_deadline_reached(fr_tick_t now, fr_tick_t deadline) {
+    return (uint32_t)(now - deadline) <= (UINT32_MAX / 2u);
+}
