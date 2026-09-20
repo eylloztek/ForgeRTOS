@@ -135,6 +135,8 @@ fr_task_status_t fr_task_create(fr_task_handle_t *out_task, const fr_task_config
     const fr_critical_state_t publish_state = fr_critical_enter();
 
     task->saved_sp = initial_sp;
+    task->wake_tick = 0u;
+    task->sleep_active = false;
     task->state = FR_TASK_STATE_READY;
     *out_task = task;
 

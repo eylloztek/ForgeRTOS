@@ -18,7 +18,7 @@
 #define FR_DEMO_TASK_A_STACK_WORDS        128u
 #define FR_DEMO_TASK_B_STACK_WORDS        96u
 
-#define FR_DEMO_VALIDATION_MASK           0x00003FFFu
+#define FR_DEMO_VALIDATION_MASK           0x0000000Fu
 #define FR_DEMO_SCHEDULER_NOT_RETURNED    0xFFu
 
 #define FR_DEMO_TURN_TASK_A                1u
@@ -38,6 +38,9 @@
 #ifndef FR_DEMO_IDLE_ONLY
 #define FR_DEMO_IDLE_ONLY 0u
 #endif
+
+#define FR_DEMO_TASK_A_SLEEP_TICKS 5u
+#define FR_DEMO_TASK_B_SLEEP_TICKS 13u
 
 _Alignas(8) uint32_t g_fr_demo_bootstrap_stack[FR_DEMO_BOOTSTRAP_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_a_stack[FR_DEMO_TASK_A_STACK_WORDS];
@@ -91,6 +94,14 @@ volatile fr_demo_preemption_stats_t g_fr_demo_task_b_preemption;
 
 volatile uint32_t g_fr_demo_task_a_entry_count;
 volatile uint32_t g_fr_demo_task_b_entry_count;
+
+volatile uint32_t g_fr_demo_task_a_sleep_calls;
+volatile uint32_t g_fr_demo_task_a_wakeups;
+volatile uint32_t g_fr_demo_task_a_sleep_errors;
+
+volatile uint32_t g_fr_demo_task_b_sleep_calls;
+volatile uint32_t g_fr_demo_task_b_wakeups;
+volatile uint32_t g_fr_demo_task_b_sleep_errors;
 
 uint32_t g_fr_demo_task_count_snapshot;
 
@@ -204,6 +215,13 @@ static void fr_demo_task_a_entry(void *argument) {
                                             local_state,
                                             &g_fr_demo_task_a_preemption);
         }
+        ++g_fr_demo_task_a_sleep_calls;
+
+        if (fr_task_sleep(FR_DEMO_TASK_A_SLEEP_TICKS)) {
+            ++g_fr_demo_task_a_wakeups;
+        }else {
+            ++g_fr_demo_task_a_sleep_errors;
+        }
     }
 }
 
@@ -245,6 +263,13 @@ static void fr_demo_task_b_entry(void *argument) {
                                             g_fr_demo_task_b_stack_pattern,
                                             local_state,
                                             &g_fr_demo_task_b_preemption);
+        }
+        ++g_fr_demo_task_b_sleep_calls;
+
+        if (fr_task_sleep(FR_DEMO_TASK_B_SLEEP_TICKS)) {
+            ++g_fr_demo_task_b_wakeups;
+        } else {
+            ++g_fr_demo_task_b_sleep_errors;
         }
     }
 }

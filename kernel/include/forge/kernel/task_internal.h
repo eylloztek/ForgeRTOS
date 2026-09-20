@@ -2,6 +2,7 @@
 #define FORGE_KERNEL_TASK_INTERNAL_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #include "forge/task.h"
 
@@ -20,6 +21,9 @@ struct fr_task {
     fr_task_priority_t priority;
     fr_task_priority_t base_priority;
     fr_task_state_t state;
+
+    uint32_t wake_tick;
+    bool sleep_active;
 };
 
 uint32_t fr_task_internal_count(void);

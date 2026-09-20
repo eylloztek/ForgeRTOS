@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "forge/config.h"
+#include "forge/tick.h"
 #include "forge/critical.h"
 #include "forge/kernel/port.h"
 #include "forge/kernel/scheduler_internal.h"
@@ -62,6 +63,9 @@ static void fr_scheduler_initialize_idle(void) {
     idle->saved_sp = fr_port_task_stack_init(idle->stack_top,
                                              idle->entry,
                                              idle->argument);
+
+    idle->wake_tick = 0u;
+    idle->sleep_active = false;
 
     idle->state = FR_TASK_STATE_READY;
 }
@@ -184,10 +188,38 @@ fr_task_handle_t fr_scheduler_current_task(void) {
     return (current_task == &g_fr_scheduler_idle_task) ? NULL : current_task;
 }
 
+static void fr_scheduler_wake_sleeping_tasks(uint32_t now) {
+    const uint32_t task_count = fr_task_internal_count();
+
+    for (uint32_t i = 0u; i < task_count; ++i) {
+        fr_task_t *const task = fr_task_internal_at(i);
+
+        if ((task == NULL) ||
+            (task->state != FR_TASK_STATE_BLOCKED) ||
+            !task->sleep_active) {
+            continue;
+        }
+
+        if ((uint32_t)(now - task->wake_tick) > FR_TASK_SLEEP_MAX_TICKS) {
+            continue;
+        }
+
+        task->sleep_active = false;
+
+        if (task == g_fr_scheduler_current_task) {
+            task->state = FR_TASK_STATE_RUNNING;
+        } else {
+            task->state = FR_TASK_STATE_READY;
+        }
+    }
+}
+
 void fr_scheduler_tick_isr(void) {
     if (!g_fr_scheduler_running) {
         return;
     }
+
+    fr_scheduler_wake_sleeping_tasks(fr_tick_now());
 
     fr_task_t *const current_task = g_fr_scheduler_current_task;
 
@@ -268,4 +300,41 @@ void fr_task_yield(void) {
     if (should_yield) {
         fr_port_yield();
     }
+}
+
+bool fr_task_sleep(uint32_t delay_ticks) {
+    if ((delay_ticks == 0u) || (delay_ticks > FR_TASK_SLEEP_MAX_TICKS)) {
+        return false;
+    }
+
+    uint32_t ipsr;
+    uint32_t primask;
+
+    __asm volatile("mrs %0, ipsr" : "=r"(ipsr));
+    __asm volatile("mrs %0, primask" : "=r"(primask));
+
+    if ((ipsr != 0u) || ((primask & 1u) != 0u)) {
+        return false;
+    }
+
+    const fr_critical_state_t critical_state = fr_critical_enter();
+    fr_task_t *const current_task = g_fr_scheduler_current_task;
+
+    if ((critical_state != 0u) ||
+        !g_fr_scheduler_running ||
+        (current_task == NULL) ||
+        (current_task == &g_fr_scheduler_idle_task) ||
+        (current_task->state != FR_TASK_STATE_RUNNING)) {
+        fr_critical_exit(critical_state);
+        return false;
+    }
+
+    current_task->wake_tick = fr_tick_now() + delay_ticks;
+    current_task->sleep_active = true;
+    current_task->state = FR_TASK_STATE_BLOCKED;
+
+    fr_port_request_context_switch();
+    fr_critical_exit(critical_state);
+
+    return true;
 }

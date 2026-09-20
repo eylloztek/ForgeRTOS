@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define FR_TASK_SLEEP_MAX_TICKS (UINT32_MAX / 2u)
+
 typedef struct fr_task fr_task_t;
 typedef fr_task_t *fr_task_handle_t;
 
@@ -54,6 +56,13 @@ typedef struct {
 fr_task_status_t fr_task_create(fr_task_handle_t *out_task, const fr_task_config_t *config);
 uint32_t fr_task_count(void);
 bool fr_task_get_info(fr_task_handle_t task, fr_task_info_t *out_info);
+
+/*
+ * Block the calling task for the requested number of kernel ticks.
+ * Returns true after the task wakes and resumes.
+ * Returns false for invalid usage or duration.
+ */
+bool fr_task_sleep(uint32_t delay_ticks);
 
 void fr_task_yield(void);
 
