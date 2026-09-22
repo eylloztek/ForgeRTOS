@@ -7,6 +7,7 @@
 #include "forge/arch/systick.h"
 #include "forge/board.h"
 #include "forge/scheduler.h"
+#include "forge/semaphore.h"
 #include "forge/task.h"
 #include "forge/tick.h"
 
@@ -110,8 +111,23 @@ volatile uint32_t g_fr_demo_task_b_last_sleep_elapsed;
 
 uint32_t g_fr_demo_task_count_snapshot;
 
-volatile fr_scheduler_status_t g_fr_demo_scheduler_return_status =
-    FR_DEMO_SCHEDULER_NOT_RETURNED;
+volatile fr_scheduler_status_t g_fr_demo_scheduler_return_status = FR_DEMO_SCHEDULER_NOT_RETURNED;
+
+static fr_binary_semaphore_t g_fr_demo_binary_semaphore;
+static fr_binary_semaphore_t g_fr_demo_semaphore_probe;
+
+volatile uint32_t g_fr_demo_semaphore_init_failures;
+volatile uint32_t g_fr_demo_semaphore_probe_failures;
+
+volatile uint32_t g_fr_demo_semaphore_give_successes;
+volatile uint32_t g_fr_demo_semaphore_give_full;
+
+volatile uint32_t g_fr_demo_semaphore_initial_empty_checks;
+volatile uint32_t g_fr_demo_semaphore_initial_timeouts;
+volatile uint32_t g_fr_demo_semaphore_forever_signals;
+
+volatile uint32_t g_fr_demo_semaphore_take_successes;
+volatile uint32_t g_fr_demo_semaphore_take_timeouts;
 
 _Static_assert((FR_DEMO_BOOTSTRAP_STACK_WORDS % 2u) == 0u, "Bootstrap stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_A_STACK_WORDS % 2u) == 0u, "Task A stack size must preserve 8-byte alignment");
@@ -220,6 +236,28 @@ static uint32_t fr_demo_test_timeout_math(void) {
     return failures;
 }
 
+static void fr_demo_run_semaphore_probe(void) {
+    if (!fr_binary_semaphore_take(&g_fr_demo_semaphore_probe, 0u)) {
+        ++g_fr_demo_semaphore_probe_failures;
+    }
+
+    if (!fr_binary_semaphore_give(&g_fr_demo_semaphore_probe)) {
+        ++g_fr_demo_semaphore_probe_failures;
+    }
+
+    if (fr_binary_semaphore_give(&g_fr_demo_semaphore_probe)) {
+        ++g_fr_demo_semaphore_probe_failures;
+    }
+
+    if (!fr_binary_semaphore_take(&g_fr_demo_semaphore_probe, 0u)) {
+        ++g_fr_demo_semaphore_probe_failures;
+    }
+
+    if (fr_binary_semaphore_take(&g_fr_demo_semaphore_probe, 0u)) {
+        ++g_fr_demo_semaphore_probe_failures;
+    }
+}
+
 static void fr_demo_task_a_entry(void *argument) {
     volatile uint32_t local_state = FR_DEMO_TASK_A_LOCAL_STATE_SEED;
 
@@ -271,6 +309,15 @@ static void fr_demo_task_a_entry(void *argument) {
             if (g_fr_demo_task_a_last_sleep_elapsed < FR_DEMO_TASK_A_SLEEP_TICKS) {
                 ++g_fr_demo_task_a_sleep_errors;
             }
+
+            if ((g_fr_demo_task_a_wakeups % 3u) == 0u) {
+                if (fr_binary_semaphore_give(&g_fr_demo_binary_semaphore)) {
+                    ++g_fr_demo_semaphore_give_successes;
+                } else {
+                    ++g_fr_demo_semaphore_give_full;
+                }
+            }
+
         } else {
             ++g_fr_demo_task_a_sleep_errors;
         }
@@ -296,7 +343,29 @@ static void fr_demo_task_b_entry(void *argument) {
 
     fr_tick_t last_toggle_tick = fr_tick_now();
 
+    fr_demo_run_semaphore_probe();
+
+    if (!fr_binary_semaphore_take(&g_fr_demo_binary_semaphore, 0u)) {
+        ++g_fr_demo_semaphore_initial_empty_checks;
+    }
+
+    if (!fr_binary_semaphore_take(&g_fr_demo_binary_semaphore, 2u)) {
+        ++g_fr_demo_semaphore_initial_timeouts;
+    }
+
+    if (fr_binary_semaphore_take(&g_fr_demo_binary_semaphore,
+                                FR_BINARY_SEMAPHORE_WAIT_FOREVER)) {
+        ++g_fr_demo_semaphore_forever_signals;
+    }
+
     while (1) {
+
+        if (fr_binary_semaphore_take(&g_fr_demo_binary_semaphore, 30u)) {
+            ++g_fr_demo_semaphore_take_successes;
+        } else {
+            ++g_fr_demo_semaphore_take_timeouts;
+        }
+
         ++g_fr_demo_task_b_iterations;
 
         local_state = fr_demo_advance_local_state(local_state);
@@ -388,6 +457,19 @@ static _Noreturn void fr_bootstrap_entry(void) {
     g_fr_demo_timeout_math_failures = fr_demo_test_timeout_math();
 
     if (!fr_systick_init(FR_BOARD_RESET_CORE_CLOCK_HZ, FR_DEMO_TICK_HZ)) {
+        while (1) {
+        }
+    }
+
+    if (!fr_binary_semaphore_init(&g_fr_demo_binary_semaphore, false)) {
+        ++g_fr_demo_semaphore_init_failures;
+    }
+
+    if (!fr_binary_semaphore_init(&g_fr_demo_semaphore_probe, true)) {
+        ++g_fr_demo_semaphore_init_failures;
+    }
+
+    if (g_fr_demo_semaphore_init_failures != 0u) {
         while (1) {
         }
     }

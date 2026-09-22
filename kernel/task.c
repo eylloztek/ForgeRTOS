@@ -136,6 +136,7 @@ fr_task_status_t fr_task_create(fr_task_handle_t *out_task, const fr_task_config
 
     task->saved_sp = initial_sp;
     task->wait_deadline = 0u;
+    task->wait_object = NULL;
     task->wait_reason = FR_WAIT_REASON_NONE;
     task->wait_result = FR_WAIT_RESULT_PENDING;
     task->wait_has_deadline = false;

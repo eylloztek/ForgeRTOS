@@ -24,6 +24,7 @@ struct fr_task {
     fr_task_state_t state;
 
     uint32_t wait_deadline;
+    const void *wait_object;
     fr_wait_reason_t wait_reason;
     volatile fr_wait_result_t wait_result;
     bool wait_has_deadline;

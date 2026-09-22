@@ -13,6 +13,7 @@ set(TARGET forgertos.elf)
 add_executable(${TARGET}
     startup/startup_stm32f446re.S
     kernel/scheduler.c
+    kernel/semaphore.c
     kernel/task.c
     kernel/tick.c
     port/cortex_m4/context_probe.S

@@ -71,6 +71,7 @@ static void fr_scheduler_initialize_idle(void) {
                                              idle->argument);
 
     idle->wait_deadline = 0u;
+    idle->wait_object = NULL;
     idle->wait_reason = FR_WAIT_REASON_NONE;
     idle->wait_result = FR_WAIT_RESULT_PENDING;
     idle->wait_has_deadline = false;
@@ -317,8 +318,12 @@ void fr_task_yield(void) {
 }
 
 bool fr_scheduler_block_current_locked(fr_wait_reason_t reason,
+                                       const void *wait_object,
                                        uint32_t timeout_ticks) {
-    if ((reason == FR_WAIT_REASON_NONE) ||
+    if (((reason != FR_WAIT_REASON_SLEEP) &&
+         (reason != FR_WAIT_REASON_SYNC)) ||
+        ((reason == FR_WAIT_REASON_SLEEP) && (wait_object != NULL)) ||
+        ((reason == FR_WAIT_REASON_SYNC) && (wait_object == NULL)) ||
         (timeout_ticks == 0u) ||
         ((timeout_ticks > FR_WAIT_MAX_FINITE_TICKS) &&
          (timeout_ticks != FR_WAIT_FOREVER))) {
@@ -334,6 +339,7 @@ bool fr_scheduler_block_current_locked(fr_wait_reason_t reason,
         return false;
     }
 
+    current_task->wait_object = wait_object;
     current_task->wait_reason = reason;
     current_task->wait_result = FR_WAIT_RESULT_PENDING;
 
@@ -356,12 +362,14 @@ bool fr_scheduler_unblock_task_locked(fr_task_t *task,
     if ((task == NULL) ||
         (task->state != FR_TASK_STATE_BLOCKED) ||
         (task->wait_reason == FR_WAIT_REASON_NONE) ||
-        (result == FR_WAIT_RESULT_PENDING)) {
+        ((result != FR_WAIT_RESULT_TIMEOUT) &&
+         (result != FR_WAIT_RESULT_SIGNALED))) {
         return false;
     }
 
     task->wait_result = result;
     task->wait_reason = FR_WAIT_REASON_NONE;
+    task->wait_object = NULL;
     task->wait_has_deadline = false;
     task->wait_deadline = 0u;
 
@@ -372,6 +380,51 @@ bool fr_scheduler_unblock_task_locked(fr_task_t *task,
     }
 
     return true;
+}
+
+fr_task_t *fr_scheduler_select_waiter_locked(const void *wait_object) {
+    if (wait_object == NULL) {
+        return NULL;
+    }
+
+    fr_task_t *selected = NULL;
+    const uint32_t task_count = fr_task_internal_count();
+
+    for (uint32_t i = 0u; i < task_count; ++i) {
+        fr_task_t *const task = fr_task_internal_at(i);
+
+        if ((task == NULL) ||
+            (task->state != FR_TASK_STATE_BLOCKED) ||
+            (task->wait_reason != FR_WAIT_REASON_SYNC) ||
+            (task->wait_result != FR_WAIT_RESULT_PENDING) ||
+            (task->wait_object != wait_object)) {
+            continue;
+        }
+
+        if ((selected == NULL) || (task->priority > selected->priority)) {
+            selected = task;
+        }
+    }
+
+    return selected;
+}
+
+void fr_scheduler_request_if_needed_locked(void) {
+    if (!g_fr_scheduler_running) {
+        return;
+    }
+
+    fr_task_t *const current_task = g_fr_scheduler_current_task;
+
+    if (current_task == NULL) {
+        return;
+    }
+
+    fr_task_t *const next_task = fr_scheduler_select_next(current_task);
+
+    if ((next_task != NULL) && (next_task != current_task)) {
+        fr_port_request_context_switch();
+    }
 }
 
 bool fr_task_sleep(uint32_t delay_ticks) {
@@ -406,7 +459,7 @@ bool fr_task_sleep(uint32_t delay_ticks) {
     }
 
     const bool blocked =
-        fr_scheduler_block_current_locked(FR_WAIT_REASON_SLEEP, delay_ticks);
+        fr_scheduler_block_current_locked(FR_WAIT_REASON_SLEEP, NULL, delay_ticks);
 
     fr_critical_exit(critical_state);
 
