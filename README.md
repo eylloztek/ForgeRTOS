@@ -27,7 +27,7 @@ Rather than relying on an existing RTOS or CMSIS-RTOS layer, ForgeRTOS implement
 - ~~Implement task sleeping and the BLOCKED state.~~
 - ~~Add timeout and wake-up management for blocked tasks.~~
 - ~~Implement binary semaphores.~~
-- Implement counting semaphores.
+- ~~Implement counting semaphores.~~
 - Implement mutex synchronization.
 - Add a reproducible priority-inversion test.
 - Implement mutex priority inheritance.

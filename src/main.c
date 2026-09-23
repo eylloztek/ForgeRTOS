@@ -129,6 +129,18 @@ volatile uint32_t g_fr_demo_semaphore_forever_signals;
 volatile uint32_t g_fr_demo_semaphore_take_successes;
 volatile uint32_t g_fr_demo_semaphore_take_timeouts;
 
+static fr_counting_semaphore_t g_fr_demo_counting_semaphore;
+static fr_counting_semaphore_t g_fr_demo_counting_probe;
+static fr_counting_semaphore_t g_fr_demo_counting_invalid_probe;
+
+volatile uint32_t g_fr_demo_counting_init_failures;
+volatile uint32_t g_fr_demo_counting_validation_failures;
+volatile uint32_t g_fr_demo_counting_probe_failures;
+
+volatile uint32_t g_fr_demo_counting_give_successes;
+volatile uint32_t g_fr_demo_counting_wait_successes;
+volatile uint32_t g_fr_demo_counting_wait_errors;
+
 _Static_assert((FR_DEMO_BOOTSTRAP_STACK_WORDS % 2u) == 0u, "Bootstrap stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_A_STACK_WORDS % 2u) == 0u, "Task A stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_B_STACK_WORDS % 2u) == 0u, "Task B stack size must preserve 8-byte alignment");
@@ -258,6 +270,53 @@ static void fr_demo_run_semaphore_probe(void) {
     }
 }
 
+static void fr_demo_run_counting_semaphore_probe(void) {
+    if ((g_fr_demo_counting_probe.count != 2u) ||
+        (g_fr_demo_counting_probe.max_count != 3u)) {
+        ++g_fr_demo_counting_probe_failures;
+    }
+
+    if (!fr_counting_semaphore_take(&g_fr_demo_counting_probe, 0u) ||
+        (g_fr_demo_counting_probe.count != 1u)) {
+        ++g_fr_demo_counting_probe_failures;
+    }
+
+    if (!fr_counting_semaphore_give(&g_fr_demo_counting_probe) ||
+        (g_fr_demo_counting_probe.count != 2u)) {
+        ++g_fr_demo_counting_probe_failures;
+    }
+
+    if (!fr_counting_semaphore_give(&g_fr_demo_counting_probe) ||
+        (g_fr_demo_counting_probe.count != 3u)) {
+        ++g_fr_demo_counting_probe_failures;
+    }
+
+    if (fr_counting_semaphore_give(&g_fr_demo_counting_probe) ||
+        (g_fr_demo_counting_probe.count != 3u)) {
+        ++g_fr_demo_counting_probe_failures;
+    }
+
+    if (!fr_counting_semaphore_take(&g_fr_demo_counting_probe, 0u) ||
+        (g_fr_demo_counting_probe.count != 2u)) {
+        ++g_fr_demo_counting_probe_failures;
+    }
+
+    if (!fr_counting_semaphore_take(&g_fr_demo_counting_probe, 0u) ||
+        (g_fr_demo_counting_probe.count != 1u)) {
+        ++g_fr_demo_counting_probe_failures;
+    }
+
+    if (!fr_counting_semaphore_take(&g_fr_demo_counting_probe, 0u) ||
+        (g_fr_demo_counting_probe.count != 0u)) {
+        ++g_fr_demo_counting_probe_failures;
+    }
+
+    if (fr_counting_semaphore_take(&g_fr_demo_counting_probe, 0u) ||
+        (g_fr_demo_counting_probe.count != 0u)) {
+        ++g_fr_demo_counting_probe_failures;
+    }
+}
+
 static void fr_demo_task_a_entry(void *argument) {
     volatile uint32_t local_state = FR_DEMO_TASK_A_LOCAL_STATE_SEED;
 
@@ -288,14 +347,6 @@ static void fr_demo_task_a_entry(void *argument) {
                                             local_state,
                                             &g_fr_demo_task_a_preemption);
         }
-        ++g_fr_demo_task_a_sleep_calls;
-
-        if (fr_task_sleep(FR_DEMO_TASK_A_SLEEP_TICKS)) {
-            ++g_fr_demo_task_a_wakeups;
-        }else {
-            ++g_fr_demo_task_a_sleep_errors;
-        }
-
         const fr_tick_t sleep_start = fr_tick_now();
 
         ++g_fr_demo_task_a_sleep_calls;
@@ -305,6 +356,13 @@ static void fr_demo_task_a_entry(void *argument) {
 
             g_fr_demo_task_a_last_sleep_elapsed =
                 fr_tick_elapsed(sleep_start, fr_tick_now());
+
+            if (g_fr_demo_task_a_wakeups == 1u) {
+                if (fr_counting_semaphore_give(
+                        &g_fr_demo_counting_semaphore)) {
+                    ++g_fr_demo_counting_give_successes;
+                }
+            }
 
             if (g_fr_demo_task_a_last_sleep_elapsed < FR_DEMO_TASK_A_SLEEP_TICKS) {
                 ++g_fr_demo_task_a_sleep_errors;
@@ -343,6 +401,16 @@ static void fr_demo_task_b_entry(void *argument) {
 
     fr_tick_t last_toggle_tick = fr_tick_now();
 
+    fr_demo_run_counting_semaphore_probe();
+
+    if (fr_counting_semaphore_take(
+            &g_fr_demo_counting_semaphore,
+            FR_COUNTING_SEMAPHORE_WAIT_FOREVER)) {
+        ++g_fr_demo_counting_wait_successes;
+    } else {
+        ++g_fr_demo_counting_wait_errors;
+    }
+
     fr_demo_run_semaphore_probe();
 
     if (!fr_binary_semaphore_take(&g_fr_demo_binary_semaphore, 0u)) {
@@ -354,7 +422,7 @@ static void fr_demo_task_b_entry(void *argument) {
     }
 
     if (fr_binary_semaphore_take(&g_fr_demo_binary_semaphore,
-                                FR_BINARY_SEMAPHORE_WAIT_FOREVER)) {
+                                 FR_BINARY_SEMAPHORE_WAIT_FOREVER)) {
         ++g_fr_demo_semaphore_forever_signals;
     }
 
@@ -385,14 +453,6 @@ static void fr_demo_task_b_entry(void *argument) {
                                             local_state,
                                             &g_fr_demo_task_b_preemption);
         }
-        ++g_fr_demo_task_b_sleep_calls;
-
-        if (fr_task_sleep(FR_DEMO_TASK_B_SLEEP_TICKS)) {
-            ++g_fr_demo_task_b_wakeups;
-        } else {
-            ++g_fr_demo_task_b_sleep_errors;
-        }
-
         const fr_tick_t sleep_start = fr_tick_now();
 
         ++g_fr_demo_task_b_sleep_calls;
@@ -470,6 +530,36 @@ static _Noreturn void fr_bootstrap_entry(void) {
     }
 
     if (g_fr_demo_semaphore_init_failures != 0u) {
+        while (1) {
+        }
+    }
+
+    if (fr_counting_semaphore_init(&g_fr_demo_counting_invalid_probe,
+                                    0u,
+                                    0u)) {
+        ++g_fr_demo_counting_validation_failures;
+    }
+
+    if (fr_counting_semaphore_init(&g_fr_demo_counting_invalid_probe,
+                                    4u,
+                                    3u)) {
+        ++g_fr_demo_counting_validation_failures;
+    }
+
+    if (!fr_counting_semaphore_init(&g_fr_demo_counting_semaphore,
+                                    0u,
+                                    3u)) {
+        ++g_fr_demo_counting_init_failures;
+    }
+
+    if (!fr_counting_semaphore_init(&g_fr_demo_counting_probe,
+                                    2u,
+                                    3u)) {
+        ++g_fr_demo_counting_init_failures;
+    }
+
+    if ((g_fr_demo_counting_init_failures != 0u) ||
+        (g_fr_demo_counting_validation_failures != 0u)) {
         while (1) {
         }
     }
