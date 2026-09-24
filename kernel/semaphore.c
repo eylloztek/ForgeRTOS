@@ -97,7 +97,7 @@ static bool fr_semaphore_give_common(uint32_t *count,
     }
 
     fr_task_t *const waiter =
-        fr_scheduler_select_waiter_locked(wait_object);
+        fr_scheduler_select_waiter_locked(FR_WAIT_REASON_SYNC, wait_object);
 
     if (waiter != NULL) {
         /*

@@ -320,10 +320,13 @@ void fr_task_yield(void) {
 bool fr_scheduler_block_current_locked(fr_wait_reason_t reason,
                                        const void *wait_object,
                                        uint32_t timeout_ticks) {
-    if (((reason != FR_WAIT_REASON_SLEEP) &&
-         (reason != FR_WAIT_REASON_SYNC)) ||
+    const bool object_wait =
+        (reason == FR_WAIT_REASON_SYNC) ||
+        (reason == FR_WAIT_REASON_MUTEX);
+
+    if (((reason != FR_WAIT_REASON_SLEEP) && !object_wait) ||
         ((reason == FR_WAIT_REASON_SLEEP) && (wait_object != NULL)) ||
-        ((reason == FR_WAIT_REASON_SYNC) && (wait_object == NULL)) ||
+        (object_wait && (wait_object == NULL)) ||
         (timeout_ticks == 0u) ||
         ((timeout_ticks > FR_WAIT_MAX_FINITE_TICKS) &&
          (timeout_ticks != FR_WAIT_FOREVER))) {
@@ -382,8 +385,11 @@ bool fr_scheduler_unblock_task_locked(fr_task_t *task,
     return true;
 }
 
-fr_task_t *fr_scheduler_select_waiter_locked(const void *wait_object) {
-    if (wait_object == NULL) {
+fr_task_t *fr_scheduler_select_waiter_locked(fr_wait_reason_t reason,
+                                             const void *wait_object) {
+    if ((wait_object == NULL) ||
+        ((reason != FR_WAIT_REASON_SYNC) &&
+         (reason != FR_WAIT_REASON_MUTEX))) {
         return NULL;
     }
 
@@ -395,13 +401,14 @@ fr_task_t *fr_scheduler_select_waiter_locked(const void *wait_object) {
 
         if ((task == NULL) ||
             (task->state != FR_TASK_STATE_BLOCKED) ||
-            (task->wait_reason != FR_WAIT_REASON_SYNC) ||
+            (task->wait_reason != reason) ||
             (task->wait_result != FR_WAIT_RESULT_PENDING) ||
             (task->wait_object != wait_object)) {
             continue;
         }
 
-        if ((selected == NULL) || (task->priority > selected->priority)) {
+        if ((selected == NULL) ||
+            (task->priority > selected->priority)) {
             selected = task;
         }
     }

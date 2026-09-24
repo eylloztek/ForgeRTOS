@@ -27,7 +27,8 @@ bool fr_scheduler_block_current_locked(fr_wait_reason_t reason,
 bool fr_scheduler_unblock_task_locked(fr_task_t *task,
                                      fr_wait_result_t result);
 
-fr_task_t *fr_scheduler_select_waiter_locked(const void *wait_object);
+fr_task_t *fr_scheduler_select_waiter_locked(fr_wait_reason_t reason,
+                                             const void *wait_object);
 
 void fr_scheduler_request_if_needed_locked(void);
 

@@ -12,7 +12,8 @@ typedef uint8_t fr_wait_result_t;
 enum {
     FR_WAIT_REASON_NONE = 0u,
     FR_WAIT_REASON_SLEEP,
-    FR_WAIT_REASON_SYNC
+    FR_WAIT_REASON_SYNC,
+    FR_WAIT_REASON_MUTEX
 };
 
 enum {

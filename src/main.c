@@ -8,6 +8,7 @@
 #include "forge/board.h"
 #include "forge/scheduler.h"
 #include "forge/semaphore.h"
+#include "forge/mutex.h"
 #include "forge/task.h"
 #include "forge/tick.h"
 
@@ -42,6 +43,9 @@
 
 #define FR_DEMO_TASK_A_SLEEP_TICKS 5u
 #define FR_DEMO_TASK_B_SLEEP_TICKS 13u
+
+#define FR_DEMO_MUTEX_HOLD_TICKS       8u
+#define FR_DEMO_MUTEX_TIMEOUT_TICKS    2u
 
 _Alignas(8) uint32_t g_fr_demo_bootstrap_stack[FR_DEMO_BOOTSTRAP_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_a_stack[FR_DEMO_TASK_A_STACK_WORDS];
@@ -140,6 +144,23 @@ volatile uint32_t g_fr_demo_counting_probe_failures;
 volatile uint32_t g_fr_demo_counting_give_successes;
 volatile uint32_t g_fr_demo_counting_wait_successes;
 volatile uint32_t g_fr_demo_counting_wait_errors;
+
+static fr_mutex_t g_fr_demo_mutex;
+static fr_mutex_t g_fr_demo_mutex_timeout_probe;
+
+volatile uint32_t g_fr_demo_mutex_init_failures;
+
+volatile uint32_t g_fr_demo_mutex_a_lock_successes;
+volatile uint32_t g_fr_demo_mutex_a_unlock_successes;
+volatile uint32_t g_fr_demo_mutex_a_recursive_rejections;
+
+volatile uint32_t g_fr_demo_mutex_b_timeout_observed;
+volatile uint32_t g_fr_demo_mutex_b_non_owner_rejections;
+volatile uint32_t g_fr_demo_mutex_b_lock_successes;
+volatile uint32_t g_fr_demo_mutex_b_unlock_successes;
+
+volatile uint32_t g_fr_demo_mutex_handoff_errors;
+volatile uint32_t g_fr_demo_mutex_errors;
 
 _Static_assert((FR_DEMO_BOOTSTRAP_STACK_WORDS % 2u) == 0u, "Bootstrap stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_A_STACK_WORDS % 2u) == 0u, "Task A stack size must preserve 8-byte alignment");
@@ -334,6 +355,40 @@ static void fr_demo_task_a_entry(void *argument) {
         g_fr_demo_task_a_argument_value = *(const uint32_t *)argument;
     }
 
+    if (fr_mutex_lock(&g_fr_demo_mutex, 0u)) {
+        ++g_fr_demo_mutex_a_lock_successes;
+    } else {
+        ++g_fr_demo_mutex_errors;
+    }
+
+    if (fr_mutex_lock(&g_fr_demo_mutex_timeout_probe, 0u)) {
+        ++g_fr_demo_mutex_a_lock_successes;
+    } else {
+        ++g_fr_demo_mutex_errors;
+    }
+
+    if (fr_mutex_lock(&g_fr_demo_mutex, 0u)) {
+        ++g_fr_demo_mutex_errors;
+    } else {
+        ++g_fr_demo_mutex_a_recursive_rejections;
+    }
+
+    if (!fr_task_sleep(FR_DEMO_MUTEX_HOLD_TICKS)) {
+        ++g_fr_demo_mutex_errors;
+    }
+
+    if (fr_mutex_unlock(&g_fr_demo_mutex_timeout_probe)) {
+        ++g_fr_demo_mutex_a_unlock_successes;
+    } else {
+        ++g_fr_demo_mutex_errors;
+    }
+
+    if (fr_mutex_unlock(&g_fr_demo_mutex)) {
+        ++g_fr_demo_mutex_a_unlock_successes;
+    } else {
+        ++g_fr_demo_mutex_errors;
+    }
+
     while (1) {
         ++g_fr_demo_task_a_iterations;
 
@@ -400,6 +455,39 @@ static void fr_demo_task_b_entry(void *argument) {
     }
 
     fr_tick_t last_toggle_tick = fr_tick_now();
+
+    if (!fr_mutex_lock(&g_fr_demo_mutex_timeout_probe,
+                        FR_DEMO_MUTEX_TIMEOUT_TICKS)) {
+        ++g_fr_demo_mutex_b_timeout_observed;
+    } else {
+        ++g_fr_demo_mutex_errors;
+
+        if (!fr_mutex_unlock(&g_fr_demo_mutex_timeout_probe)) {
+            ++g_fr_demo_mutex_errors;
+        }
+    }
+
+    if (fr_mutex_unlock(&g_fr_demo_mutex)) {
+        ++g_fr_demo_mutex_errors;
+    } else {
+        ++g_fr_demo_mutex_b_non_owner_rejections;
+    }
+
+    if (fr_mutex_lock(&g_fr_demo_mutex, FR_MUTEX_WAIT_FOREVER)) {
+        ++g_fr_demo_mutex_b_lock_successes;
+
+        if (g_fr_demo_mutex.owner != g_fr_demo_task_b) {
+            ++g_fr_demo_mutex_handoff_errors;
+        }
+
+        if (fr_mutex_unlock(&g_fr_demo_mutex)) {
+            ++g_fr_demo_mutex_b_unlock_successes;
+        } else {
+            ++g_fr_demo_mutex_errors;
+        }
+    } else {
+        ++g_fr_demo_mutex_errors;
+    }
 
     fr_demo_run_counting_semaphore_probe();
 
@@ -560,6 +648,19 @@ static _Noreturn void fr_bootstrap_entry(void) {
 
     if ((g_fr_demo_counting_init_failures != 0u) ||
         (g_fr_demo_counting_validation_failures != 0u)) {
+        while (1) {
+        }
+    }
+
+    if (!fr_mutex_init(&g_fr_demo_mutex)) {
+        ++g_fr_demo_mutex_init_failures;
+    }
+
+    if (!fr_mutex_init(&g_fr_demo_mutex_timeout_probe)) {
+        ++g_fr_demo_mutex_init_failures;
+    }
+
+    if (g_fr_demo_mutex_init_failures != 0u) {
         while (1) {
         }
     }
