@@ -19,6 +19,7 @@
 
 #define FR_DEMO_TASK_A_STACK_WORDS        128u
 #define FR_DEMO_TASK_B_STACK_WORDS        96u
+#define FR_DEMO_TASK_C_STACK_WORDS        96u
 
 #define FR_DEMO_VALIDATION_MASK           0x0000000Fu
 #define FR_DEMO_SCHEDULER_NOT_RETURNED    0xFFu
@@ -30,12 +31,18 @@
 #define FR_DEMO_TASK_B_LOCAL_STATE_SEED    0x2468ACE0u
 
 #ifndef FR_DEMO_TASK_A_PRIORITY
-#define FR_DEMO_TASK_A_PRIORITY 7u
+#define FR_DEMO_TASK_A_PRIORITY 3u
 #endif
 
 #ifndef FR_DEMO_TASK_B_PRIORITY
-#define FR_DEMO_TASK_B_PRIORITY 7u
+#define FR_DEMO_TASK_B_PRIORITY 9u
 #endif
+
+#ifndef FR_DEMO_TASK_C_PRIORITY
+#define FR_DEMO_TASK_C_PRIORITY 6u
+#endif
+
+#define FR_DEMO_INVERSION_MEDIUM_RUN_TICKS 20u
 
 #ifndef FR_DEMO_IDLE_ONLY
 #define FR_DEMO_IDLE_ONLY 0u
@@ -50,6 +57,7 @@
 _Alignas(8) uint32_t g_fr_demo_bootstrap_stack[FR_DEMO_BOOTSTRAP_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_a_stack[FR_DEMO_TASK_A_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_b_stack[FR_DEMO_TASK_B_STACK_WORDS];
+_Alignas(8) uint32_t g_fr_demo_task_c_stack[FR_DEMO_TASK_C_STACK_WORDS];
 
 uint32_t g_fr_demo_task_a_argument = 0xA1A1A1A1u;
 uint32_t g_fr_demo_task_b_argument = 0xB2B2B2B2u;
@@ -85,6 +93,9 @@ fr_task_info_t g_fr_demo_task_b_info;
 fr_task_status_t g_fr_demo_task_a_status;
 fr_task_status_t g_fr_demo_task_b_status;
 
+fr_task_handle_t g_fr_demo_task_c;
+fr_task_status_t g_fr_demo_task_c_status;
+
 volatile uint32_t g_fr_demo_task_a_started;
 volatile uint32_t g_fr_demo_task_b_started;
 
@@ -99,6 +110,7 @@ volatile fr_demo_preemption_stats_t g_fr_demo_task_b_preemption;
 
 volatile uint32_t g_fr_demo_task_a_entry_count;
 volatile uint32_t g_fr_demo_task_b_entry_count;
+volatile uint32_t g_fr_demo_task_c_entry_count;
 
 volatile uint32_t g_fr_demo_task_a_sleep_calls;
 volatile uint32_t g_fr_demo_task_a_wakeups;
@@ -137,6 +149,12 @@ static fr_counting_semaphore_t g_fr_demo_counting_semaphore;
 static fr_counting_semaphore_t g_fr_demo_counting_probe;
 static fr_counting_semaphore_t g_fr_demo_counting_invalid_probe;
 
+static fr_mutex_t g_fr_demo_inversion_mutex;
+
+static fr_binary_semaphore_t g_fr_demo_inversion_high_gate;
+static fr_binary_semaphore_t g_fr_demo_inversion_medium_gate;
+static fr_binary_semaphore_t g_fr_demo_day23_start_gate;
+
 volatile uint32_t g_fr_demo_counting_init_failures;
 volatile uint32_t g_fr_demo_counting_validation_failures;
 volatile uint32_t g_fr_demo_counting_probe_failures;
@@ -162,10 +180,40 @@ volatile uint32_t g_fr_demo_mutex_b_unlock_successes;
 volatile uint32_t g_fr_demo_mutex_handoff_errors;
 volatile uint32_t g_fr_demo_mutex_errors;
 
+volatile uint32_t g_fr_demo_inversion_init_failures;
+volatile uint32_t g_fr_demo_inversion_errors;
+
+volatile uint32_t g_fr_demo_inversion_low_lock_successes;
+volatile uint32_t g_fr_demo_inversion_low_unlock_successes;
+
+volatile uint32_t g_fr_demo_inversion_high_wait_started;
+volatile uint32_t g_fr_demo_inversion_high_lock_successes;
+volatile uint32_t g_fr_demo_inversion_high_unlock_successes;
+
+volatile uint32_t g_fr_demo_inversion_medium_started;
+volatile uint32_t g_fr_demo_inversion_medium_completed;
+volatile uint32_t g_fr_demo_inversion_medium_iterations;
+
+volatile uint32_t g_fr_demo_inversion_low_lock_tick;
+volatile uint32_t g_fr_demo_inversion_low_unlock_tick;
+
+volatile uint32_t g_fr_demo_inversion_high_wait_start_tick;
+volatile uint32_t g_fr_demo_inversion_high_acquire_tick;
+volatile uint32_t g_fr_demo_inversion_high_wait_elapsed;
+
+volatile uint32_t g_fr_demo_inversion_medium_start_tick;
+volatile uint32_t g_fr_demo_inversion_medium_end_tick;
+volatile uint32_t g_fr_demo_inversion_medium_run_elapsed;
+
+volatile uint32_t g_fr_demo_inversion_observed;
+
 _Static_assert((FR_DEMO_BOOTSTRAP_STACK_WORDS % 2u) == 0u, "Bootstrap stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_A_STACK_WORDS % 2u) == 0u, "Task A stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_B_STACK_WORDS % 2u) == 0u, "Task B stack size must preserve 8-byte alignment");
+_Static_assert((FR_DEMO_TASK_C_STACK_WORDS % 2u) == 0u, "Task C stack size must preserve 8-byte alignment");
 _Static_assert((FR_BOARD_RESET_CORE_CLOCK_HZ % FR_DEMO_TICK_HZ) == 0u, "SysTick frequency must divide core clock exactly");
+_Static_assert(FR_DEMO_TASK_A_PRIORITY < FR_DEMO_TASK_C_PRIORITY, "Task A must have lower priority than Task C");
+_Static_assert(FR_DEMO_TASK_C_PRIORITY < FR_DEMO_TASK_B_PRIORITY, "Task C must have lower priority than Task B");
 
 static void fr_demo_prepare_bootstrap_stack(void) {
     for (uint32_t i = 0u; i < FR_DEMO_BOOTSTRAP_STACK_WORDS; ++i) {
@@ -355,6 +403,44 @@ static void fr_demo_task_a_entry(void *argument) {
         g_fr_demo_task_a_argument_value = *(const uint32_t *)argument;
     }
 
+    if (fr_mutex_lock(&g_fr_demo_inversion_mutex, 0u)) {
+        ++g_fr_demo_inversion_low_lock_successes;
+        g_fr_demo_inversion_low_lock_tick = fr_tick_now();
+    } else {
+        ++g_fr_demo_inversion_errors;
+    }
+
+    /*
+     * Release the high-priority task first.
+     */
+    if (!fr_binary_semaphore_give(&g_fr_demo_inversion_high_gate)) {
+        ++g_fr_demo_inversion_errors;
+    }
+
+    /*
+    * Then release the medium-priority task.
+    */
+    if (!fr_binary_semaphore_give(&g_fr_demo_inversion_medium_gate)) {
+        ++g_fr_demo_inversion_errors;
+    }
+
+    /*
+    * Stay READY while the medium-priority task monopolizes the CPU.
+    * Yield guarantees that any newly-ready higher-priority task gets
+    * an immediate scheduling opportunity.
+    */
+    while (g_fr_demo_inversion_medium_completed == 0u) {
+        fr_task_yield();
+    }
+
+    g_fr_demo_inversion_low_unlock_tick = fr_tick_now();
+
+    if (fr_mutex_unlock(&g_fr_demo_inversion_mutex)) {
+        ++g_fr_demo_inversion_low_unlock_successes;
+    } else {
+        ++g_fr_demo_inversion_errors;
+    }
+
     if (fr_mutex_lock(&g_fr_demo_mutex, 0u)) {
         ++g_fr_demo_mutex_a_lock_successes;
     } else {
@@ -371,6 +457,10 @@ static void fr_demo_task_a_entry(void *argument) {
         ++g_fr_demo_mutex_errors;
     } else {
         ++g_fr_demo_mutex_a_recursive_rejections;
+    }
+
+    if (!fr_binary_semaphore_give(&g_fr_demo_day23_start_gate)) {
+        ++g_fr_demo_inversion_errors;
     }
 
     if (!fr_task_sleep(FR_DEMO_MUTEX_HOLD_TICKS)) {
@@ -455,6 +545,58 @@ static void fr_demo_task_b_entry(void *argument) {
     }
 
     fr_tick_t last_toggle_tick = fr_tick_now();
+
+    if (!fr_binary_semaphore_take(
+            &g_fr_demo_inversion_high_gate,
+            FR_BINARY_SEMAPHORE_WAIT_FOREVER)) {
+        ++g_fr_demo_inversion_errors;
+    }
+
+    g_fr_demo_inversion_high_wait_start_tick = fr_tick_now();
+    ++g_fr_demo_inversion_high_wait_started;
+
+    if (fr_mutex_lock(&g_fr_demo_inversion_mutex,
+                    FR_MUTEX_WAIT_FOREVER)) {
+        ++g_fr_demo_inversion_high_lock_successes;
+
+        g_fr_demo_inversion_high_acquire_tick = fr_tick_now();
+
+        g_fr_demo_inversion_high_wait_elapsed =
+            fr_tick_elapsed(g_fr_demo_inversion_high_wait_start_tick,
+                            g_fr_demo_inversion_high_acquire_tick);
+
+        if (g_fr_demo_inversion_mutex.owner != g_fr_demo_task_b) {
+            ++g_fr_demo_inversion_errors;
+        }
+
+        if (g_fr_demo_inversion_medium_completed == 0u) {
+            ++g_fr_demo_inversion_errors;
+        }
+
+        if (g_fr_demo_inversion_high_wait_elapsed <
+            g_fr_demo_inversion_medium_run_elapsed) {
+            ++g_fr_demo_inversion_errors;
+        } else {
+            g_fr_demo_inversion_observed = 1u;
+        }
+
+        if (fr_mutex_unlock(&g_fr_demo_inversion_mutex)) {
+            ++g_fr_demo_inversion_high_unlock_successes;
+        } else {
+            ++g_fr_demo_inversion_errors;
+        }
+    } else {
+        ++g_fr_demo_inversion_errors;
+    }
+
+    /*
+     * Wait here until Task A has prepared the original mutex test.
+     */
+    if (!fr_binary_semaphore_take(
+            &g_fr_demo_day23_start_gate,
+            FR_BINARY_SEMAPHORE_WAIT_FOREVER)) {
+        ++g_fr_demo_inversion_errors;
+    }
 
     if (!fr_mutex_lock(&g_fr_demo_mutex_timeout_probe,
                         FR_DEMO_MUTEX_TIMEOUT_TICKS)) {
@@ -560,6 +702,59 @@ static void fr_demo_task_b_entry(void *argument) {
     }
 }
 
+static void fr_demo_task_c_entry(void *argument) {
+    (void)argument;
+
+    ++g_fr_demo_task_c_entry_count;
+
+    /*
+     * Do not participate until the low-priority owner has acquired
+     * the inversion-test mutex.
+     */
+    if (!fr_binary_semaphore_take(
+            &g_fr_demo_inversion_medium_gate,
+            FR_BINARY_SEMAPHORE_WAIT_FOREVER)) {
+        ++g_fr_demo_inversion_errors;
+
+        while (1) {
+            (void)fr_task_sleep(FR_TASK_SLEEP_MAX_TICKS);
+        }
+    }
+
+    ++g_fr_demo_inversion_medium_started;
+
+    if ((g_fr_demo_inversion_mutex.owner != g_fr_demo_task_a) ||
+        (g_fr_demo_inversion_high_wait_started == 0u)) {
+        ++g_fr_demo_inversion_errors;
+    }
+
+    g_fr_demo_inversion_medium_start_tick = fr_tick_now();
+
+    while (fr_tick_elapsed(g_fr_demo_inversion_medium_start_tick,
+                           fr_tick_now()) <
+           FR_DEMO_INVERSION_MEDIUM_RUN_TICKS) {
+        ++g_fr_demo_inversion_medium_iterations;
+    }
+
+    g_fr_demo_inversion_medium_end_tick = fr_tick_now();
+
+    g_fr_demo_inversion_medium_run_elapsed =
+        fr_tick_elapsed(g_fr_demo_inversion_medium_start_tick,
+                        g_fr_demo_inversion_medium_end_tick);
+
+    ++g_fr_demo_inversion_medium_completed;
+
+    /*
+     * For now we need this task only once. Park it for the longest
+     * supported finite sleep interval.
+     */
+    while (1) {
+        if (!fr_task_sleep(FR_TASK_SLEEP_MAX_TICKS)) {
+            ++g_fr_demo_inversion_errors;
+        }
+    }
+}
+
 static bool fr_demo_create_tasks(void) {
     const fr_task_config_t task_a_config = {
         .entry = fr_demo_task_a_entry,
@@ -577,11 +772,21 @@ static bool fr_demo_create_tasks(void) {
         .priority = FR_DEMO_TASK_B_PRIORITY
     };
 
+    const fr_task_config_t task_c_config = {
+        .entry = fr_demo_task_c_entry,
+        .argument = NULL,
+        .stack_memory = g_fr_demo_task_c_stack,
+        .stack_size_words = FR_DEMO_TASK_C_STACK_WORDS,
+        .priority = FR_DEMO_TASK_C_PRIORITY
+    };
+
     g_fr_demo_task_a_status = fr_task_create(&g_fr_demo_task_a, &task_a_config);
     g_fr_demo_task_b_status = fr_task_create(&g_fr_demo_task_b, &task_b_config);
+    g_fr_demo_task_c_status = fr_task_create(&g_fr_demo_task_c, &task_c_config);
 
     if ((g_fr_demo_task_a_status != FR_TASK_OK) ||
-        (g_fr_demo_task_b_status != FR_TASK_OK)) {
+        (g_fr_demo_task_b_status != FR_TASK_OK) ||
+        (g_fr_demo_task_c_status != FR_TASK_OK)) {
         return false;
     }
 
@@ -661,6 +866,27 @@ static _Noreturn void fr_bootstrap_entry(void) {
     }
 
     if (g_fr_demo_mutex_init_failures != 0u) {
+        while (1) {
+        }
+    }
+
+    if (!fr_mutex_init(&g_fr_demo_inversion_mutex)) {
+        ++g_fr_demo_inversion_init_failures;
+    }
+
+    if (!fr_binary_semaphore_init(&g_fr_demo_inversion_high_gate, false)) {
+        ++g_fr_demo_inversion_init_failures;
+    }
+
+    if (!fr_binary_semaphore_init(&g_fr_demo_inversion_medium_gate, false)) {
+        ++g_fr_demo_inversion_init_failures;
+    }
+
+    if (!fr_binary_semaphore_init(&g_fr_demo_day23_start_gate, false)) {
+        ++g_fr_demo_inversion_init_failures;
+    }
+
+    if (g_fr_demo_inversion_init_failures != 0u) {
         while (1) {
         }
     }
