@@ -43,8 +43,8 @@ typedef struct {
 typedef struct {
     uint32_t id;
     fr_task_state_t state;
-    fr_task_priority_t priority;
-    fr_task_priority_t base_priority;
+    fr_task_priority_t priority;      /* Current effective priority. */
+    fr_task_priority_t base_priority; /* Configured base priority. */
 
     uint32_t stack_size_words;
 

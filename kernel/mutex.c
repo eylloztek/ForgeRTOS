@@ -1,8 +1,9 @@
 #include <stdbool.h>
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "forge/critical.h"
+#include "forge/kernel/mutex_internal.h"
 #include "forge/kernel/scheduler_internal.h"
 #include "forge/kernel/task_internal.h"
 #include "forge/kernel/wait_internal.h"
@@ -31,6 +32,125 @@ static bool fr_mutex_thread_context_allowed(void) {
 static bool fr_mutex_timeout_valid(uint32_t timeout_ticks) {
     return (timeout_ticks <= FR_WAIT_MAX_FINITE_TICKS) ||
            (timeout_ticks == FR_WAIT_FOREVER);
+}
+
+static fr_task_priority_t fr_mutex_compute_effective_priority_locked(
+    const fr_task_t *owner) {
+    fr_task_priority_t effective_priority = owner->base_priority;
+    const uint32_t task_count = fr_task_internal_count();
+
+    for (uint32_t i = 0u; i < task_count; ++i) {
+        const fr_task_t *const waiter = fr_task_internal_at(i);
+
+        if ((waiter == NULL) ||
+            (waiter->state != FR_TASK_STATE_BLOCKED) ||
+            (waiter->wait_reason != FR_WAIT_REASON_MUTEX) ||
+            (waiter->wait_result != FR_WAIT_RESULT_PENDING) ||
+            (waiter->wait_object == NULL)) {
+            continue;
+        }
+
+        const fr_mutex_t *const mutex =
+            (const fr_mutex_t *)waiter->wait_object;
+
+        if ((mutex->magic != FR_MUTEX_MAGIC) ||
+            (mutex->owner != owner)) {
+            continue;
+        }
+
+        if (waiter->priority > effective_priority) {
+            effective_priority = waiter->priority;
+        }
+    }
+
+    return effective_priority;
+}
+
+static void fr_mutex_inherit_priority_chain_locked(
+    fr_task_t *owner,
+    fr_task_priority_t donated_priority) {
+    const uint32_t task_count = fr_task_internal_count();
+
+    for (uint32_t depth = 0u;
+         (owner != NULL) && (depth < task_count);
+         ++depth) {
+        if (donated_priority > owner->priority) {
+            owner->priority = donated_priority;
+        }
+
+        donated_priority = owner->priority;
+
+        if ((owner->state != FR_TASK_STATE_BLOCKED) ||
+            (owner->wait_reason != FR_WAIT_REASON_MUTEX) ||
+            (owner->wait_object == NULL)) {
+            break;
+        }
+
+        fr_mutex_t *const upstream_mutex =
+            (fr_mutex_t *)owner->wait_object;
+
+        if (upstream_mutex->magic != FR_MUTEX_MAGIC) {
+            break;
+        }
+
+        fr_task_t *const upstream_owner = upstream_mutex->owner;
+
+        if ((upstream_owner == NULL) ||
+            (upstream_owner == owner)) {
+            break;
+        }
+
+        owner = upstream_owner;
+    }
+}
+
+static void fr_mutex_recompute_priority_chain_locked(fr_task_t *task) {
+    const uint32_t task_count = fr_task_internal_count();
+
+    for (uint32_t depth = 0u;
+         (task != NULL) && (depth < task_count);
+         ++depth) {
+        task->priority =
+            fr_mutex_compute_effective_priority_locked(task);
+
+        if ((task->state != FR_TASK_STATE_BLOCKED) ||
+            (task->wait_reason != FR_WAIT_REASON_MUTEX) ||
+            (task->wait_object == NULL)) {
+            break;
+        }
+
+        fr_mutex_t *const upstream_mutex =
+            (fr_mutex_t *)task->wait_object;
+
+        if (upstream_mutex->magic != FR_MUTEX_MAGIC) {
+            break;
+        }
+
+        fr_task_t *const upstream_owner = upstream_mutex->owner;
+
+        if ((upstream_owner == NULL) ||
+            (upstream_owner == task)) {
+            break;
+        }
+
+        task = upstream_owner;
+    }
+}
+
+void fr_mutex_waiter_removed_locked(const void *wait_object) {
+    if (wait_object == NULL) {
+        return;
+    }
+
+    const fr_mutex_t *const mutex =
+        (const fr_mutex_t *)wait_object;
+
+    if ((mutex->magic != FR_MUTEX_MAGIC) ||
+        (mutex->owner == NULL)) {
+        return;
+    }
+
+    fr_mutex_recompute_priority_chain_locked(mutex->owner);
 }
 
 bool fr_mutex_init(fr_mutex_t *mutex) {
@@ -70,9 +190,6 @@ bool fr_mutex_lock(fr_mutex_t *mutex, uint32_t timeout_ticks) {
         return true;
     }
 
-    /*
-     * ForgeRTOS mutexes are intentionally non-recursive.
-     */
     if (mutex->owner == current_task) {
         fr_critical_exit(critical_state);
         return false;
@@ -83,10 +200,17 @@ bool fr_mutex_lock(fr_mutex_t *mutex, uint32_t timeout_ticks) {
         return false;
     }
 
+    fr_task_t *const owner = mutex->owner;
+
     const bool blocked =
         fr_scheduler_block_current_locked(FR_WAIT_REASON_MUTEX,
                                           mutex,
                                           timeout_ticks);
+
+    if (blocked) {
+        fr_mutex_inherit_priority_chain_locked(owner,
+                                               current_task->priority);
+    }
 
     fr_critical_exit(critical_state);
 
@@ -119,13 +243,15 @@ bool fr_mutex_unlock(fr_mutex_t *mutex) {
     if (waiter == NULL) {
         mutex->owner = NULL;
 
+        fr_mutex_recompute_priority_chain_locked(current_task);
+
         fr_critical_exit(critical_state);
         return true;
     }
 
     /*
-     * Direct ownership handoff:
-     * the mutex never becomes momentarily ownerless.
+     * Transfer ownership before waking the waiter. The mutex therefore
+     * never becomes momentarily ownerless.
      */
     mutex->owner = waiter;
 
@@ -137,6 +263,13 @@ bool fr_mutex_unlock(fr_mutex_t *mutex) {
         fr_critical_exit(critical_state);
         return false;
     }
+
+    /*
+     * The old owner no longer owns this mutex. Recalculate its
+     * effective priority from its base priority and any remaining
+     * mutex waiters on other mutexes that it still owns.
+     */
+    fr_mutex_recompute_priority_chain_locked(current_task);
 
     fr_scheduler_request_if_needed_locked();
 

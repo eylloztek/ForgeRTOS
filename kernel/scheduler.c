@@ -9,6 +9,7 @@
 #include "forge/kernel/port.h"
 #include "forge/kernel/scheduler_internal.h"
 #include "forge/kernel/task_internal.h"
+#include "forge/kernel/mutex_internal.h"
 #include "forge/scheduler.h"
 #include "forge/task.h"
 
@@ -219,8 +220,17 @@ static void fr_scheduler_expire_timeouts(uint32_t now) {
         }
 
         const uint32_t deadline = task->wait_deadline;
+        const fr_wait_reason_t expired_reason = task->wait_reason;
+        const void *const expired_object = task->wait_object;
 
-        if (fr_scheduler_unblock_task_locked(task, FR_WAIT_RESULT_TIMEOUT)) {
+        if (fr_scheduler_unblock_task_locked(
+                task,
+                FR_WAIT_RESULT_TIMEOUT)) {
+            if ((expired_reason == FR_WAIT_REASON_MUTEX) &&
+                (expired_object != NULL)) {
+                fr_mutex_waiter_removed_locked(expired_object);
+            }
+
             ++g_fr_scheduler_timeout_count;
             g_fr_scheduler_last_timeout_task_id = task->id;
             g_fr_scheduler_last_timeout_tick = now;

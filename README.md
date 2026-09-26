@@ -30,7 +30,7 @@ Rather than relying on an existing RTOS or CMSIS-RTOS layer, ForgeRTOS implement
 - ~~Implement counting semaphores.~~
 - ~~Implement mutex synchronization.~~
 - ~~Add a reproducible priority-inversion test.~~
-- Implement mutex priority inheritance.
+- ~~Implement mutex priority inheritance.~~
 - Add kernel message queues.
 - Implement blocking queue send and receive operations.
 - Add task event flags.

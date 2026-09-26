@@ -205,7 +205,14 @@ volatile uint32_t g_fr_demo_inversion_medium_start_tick;
 volatile uint32_t g_fr_demo_inversion_medium_end_tick;
 volatile uint32_t g_fr_demo_inversion_medium_run_elapsed;
 
-volatile uint32_t g_fr_demo_inversion_observed;
+volatile uint32_t g_fr_demo_inheritance_owner_boosted;
+volatile uint32_t g_fr_demo_inheritance_owner_restored;
+volatile uint32_t g_fr_demo_inheritance_high_before_medium;
+volatile uint32_t g_fr_demo_inheritance_observed;
+
+volatile uint32_t g_fr_demo_inheritance_low_effective_priority;
+volatile uint32_t g_fr_demo_inheritance_low_base_priority;
+volatile uint32_t g_fr_demo_inheritance_low_priority_after_unlock;
 
 _Static_assert((FR_DEMO_BOOTSTRAP_STACK_WORDS % 2u) == 0u, "Bootstrap stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_A_STACK_WORDS % 2u) == 0u, "Task A stack size must preserve 8-byte alignment");
@@ -410,27 +417,35 @@ static void fr_demo_task_a_entry(void *argument) {
         ++g_fr_demo_inversion_errors;
     }
 
-    /*
-     * Release the high-priority task first.
-     */
     if (!fr_binary_semaphore_give(&g_fr_demo_inversion_high_gate)) {
         ++g_fr_demo_inversion_errors;
     }
 
     /*
-    * Then release the medium-priority task.
-    */
+     * Task B preempts A here, blocks on the inversion mutex, and donates
+     * its higher priority to A. When A resumes, its effective priority
+     * should be 9 while its configured base priority remains 3.
+     */
     if (!fr_binary_semaphore_give(&g_fr_demo_inversion_medium_gate)) {
         ++g_fr_demo_inversion_errors;
     }
 
-    /*
-    * Stay READY while the medium-priority task monopolizes the CPU.
-    * Yield guarantees that any newly-ready higher-priority task gets
-    * an immediate scheduling opportunity.
-    */
-    while (g_fr_demo_inversion_medium_completed == 0u) {
-        fr_task_yield();
+    fr_task_info_t inheritance_info;
+
+    if (!fr_task_get_info(g_fr_demo_task_a, &inheritance_info)) {
+        ++g_fr_demo_inversion_errors;
+    } else {
+        g_fr_demo_inheritance_low_effective_priority =
+            inheritance_info.priority;
+        g_fr_demo_inheritance_low_base_priority =
+            inheritance_info.base_priority;
+
+        if ((inheritance_info.priority == FR_DEMO_TASK_B_PRIORITY) &&
+            (inheritance_info.base_priority == FR_DEMO_TASK_A_PRIORITY)) {
+            g_fr_demo_inheritance_owner_boosted = 1u;
+        } else {
+            ++g_fr_demo_inversion_errors;
+        }
     }
 
     g_fr_demo_inversion_low_unlock_tick = fr_tick_now();
@@ -439,6 +454,24 @@ static void fr_demo_task_a_entry(void *argument) {
         ++g_fr_demo_inversion_low_unlock_successes;
     } else {
         ++g_fr_demo_inversion_errors;
+    }
+
+    /*
+     * Task B may preempt A inside fr_mutex_unlock(). When A eventually
+     * resumes, the inherited priority must have been removed.
+     */
+    if (!fr_task_get_info(g_fr_demo_task_a, &inheritance_info)) {
+        ++g_fr_demo_inversion_errors;
+    } else {
+        g_fr_demo_inheritance_low_priority_after_unlock =
+            inheritance_info.priority;
+
+        if ((inheritance_info.priority == FR_DEMO_TASK_A_PRIORITY) &&
+            (inheritance_info.base_priority == FR_DEMO_TASK_A_PRIORITY)) {
+            g_fr_demo_inheritance_owner_restored = 1u;
+        } else {
+            ++g_fr_demo_inversion_errors;
+        }
     }
 
     if (fr_mutex_lock(&g_fr_demo_mutex, 0u)) {
@@ -556,7 +589,7 @@ static void fr_demo_task_b_entry(void *argument) {
     ++g_fr_demo_inversion_high_wait_started;
 
     if (fr_mutex_lock(&g_fr_demo_inversion_mutex,
-                    FR_MUTEX_WAIT_FOREVER)) {
+                      FR_MUTEX_WAIT_FOREVER)) {
         ++g_fr_demo_inversion_high_lock_successes;
 
         g_fr_demo_inversion_high_acquire_tick = fr_tick_now();
@@ -569,15 +602,15 @@ static void fr_demo_task_b_entry(void *argument) {
             ++g_fr_demo_inversion_errors;
         }
 
-        if (g_fr_demo_inversion_medium_completed == 0u) {
-            ++g_fr_demo_inversion_errors;
-        }
-
-        if (g_fr_demo_inversion_high_wait_elapsed <
-            g_fr_demo_inversion_medium_run_elapsed) {
-            ++g_fr_demo_inversion_errors;
+        /*
+         * With priority inheritance, B must acquire the mutex before the
+         * medium-priority workload is allowed to run.
+         */
+        if ((g_fr_demo_inversion_medium_started == 0u) &&
+            (g_fr_demo_inversion_medium_completed == 0u)) {
+            g_fr_demo_inheritance_high_before_medium = 1u;
         } else {
-            g_fr_demo_inversion_observed = 1u;
+            ++g_fr_demo_inversion_errors;
         }
 
         if (fr_mutex_unlock(&g_fr_demo_inversion_mutex)) {
@@ -723,8 +756,9 @@ static void fr_demo_task_c_entry(void *argument) {
 
     ++g_fr_demo_inversion_medium_started;
 
-    if ((g_fr_demo_inversion_mutex.owner != g_fr_demo_task_a) ||
-        (g_fr_demo_inversion_high_wait_started == 0u)) {
+    if ((g_fr_demo_inheritance_high_before_medium == 0u) ||
+        (g_fr_demo_inversion_high_lock_successes != 1u) ||
+        (g_fr_demo_inversion_high_unlock_successes != 1u)) {
         ++g_fr_demo_inversion_errors;
     }
 
@@ -743,6 +777,14 @@ static void fr_demo_task_c_entry(void *argument) {
                         g_fr_demo_inversion_medium_end_tick);
 
     ++g_fr_demo_inversion_medium_completed;
+
+    if ((g_fr_demo_inheritance_high_before_medium != 0u) &&
+        (g_fr_demo_inversion_high_wait_elapsed <
+         g_fr_demo_inversion_medium_run_elapsed)) {
+        g_fr_demo_inheritance_observed = 1u;
+    } else {
+        ++g_fr_demo_inversion_errors;
+    }
 
     /*
      * For now we need this task only once. Park it for the longest
