@@ -9,6 +9,7 @@
 #include "forge/scheduler.h"
 #include "forge/semaphore.h"
 #include "forge/mutex.h"
+#include "forge/queue.h"
 #include "forge/task.h"
 #include "forge/tick.h"
 
@@ -54,6 +55,9 @@
 #define FR_DEMO_MUTEX_HOLD_TICKS       8u
 #define FR_DEMO_MUTEX_TIMEOUT_TICKS    2u
 
+#define FR_DEMO_QUEUE_CAPACITY       4u
+#define FR_DEMO_QUEUE_PROBE_CAPACITY 3u
+
 _Alignas(8) uint32_t g_fr_demo_bootstrap_stack[FR_DEMO_BOOTSTRAP_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_a_stack[FR_DEMO_TASK_A_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_b_stack[FR_DEMO_TASK_B_STACK_WORDS];
@@ -83,6 +87,11 @@ typedef struct {
     uint32_t local_state_errors;
     uint32_t local_state_snapshot;
 } fr_demo_preemption_stats_t;
+
+typedef struct {
+    uint32_t sequence;
+    fr_tick_t produced_tick;
+} fr_demo_queue_message_t;
 
 fr_task_handle_t g_fr_demo_task_a;
 fr_task_handle_t g_fr_demo_task_b;
@@ -213,6 +222,32 @@ volatile uint32_t g_fr_demo_inheritance_observed;
 volatile uint32_t g_fr_demo_inheritance_low_effective_priority;
 volatile uint32_t g_fr_demo_inheritance_low_base_priority;
 volatile uint32_t g_fr_demo_inheritance_low_priority_after_unlock;
+
+static fr_queue_t g_fr_demo_queue;
+static fr_demo_queue_message_t g_fr_demo_queue_storage[FR_DEMO_QUEUE_CAPACITY];
+static fr_queue_t g_fr_demo_queue_probe;
+static uint32_t g_fr_demo_queue_probe_storage[FR_DEMO_QUEUE_PROBE_CAPACITY];
+static fr_queue_t g_fr_demo_queue_invalid_probe;
+static uint32_t g_fr_demo_queue_invalid_storage[1];
+
+volatile uint32_t g_fr_demo_queue_init_failures;
+volatile uint32_t g_fr_demo_queue_validation_failures;
+volatile uint32_t g_fr_demo_queue_probe_failures;
+
+volatile uint32_t g_fr_demo_queue_send_successes;
+volatile uint32_t g_fr_demo_queue_send_full;
+
+volatile uint32_t g_fr_demo_queue_receive_successes;
+volatile uint32_t g_fr_demo_queue_receive_empty;
+volatile uint32_t g_fr_demo_queue_order_errors;
+
+volatile uint32_t g_fr_demo_queue_next_sequence;
+volatile uint32_t g_fr_demo_queue_last_sent_sequence;
+volatile uint32_t g_fr_demo_queue_last_received_sequence;
+
+volatile uint32_t g_fr_demo_queue_last_produced_tick;
+volatile uint32_t g_fr_demo_queue_last_received_tick;
+volatile uint32_t g_fr_demo_queue_last_latency;
 
 _Static_assert((FR_DEMO_BOOTSTRAP_STACK_WORDS % 2u) == 0u, "Bootstrap stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_A_STACK_WORDS % 2u) == 0u, "Task A stack size must preserve 8-byte alignment");
@@ -393,6 +428,63 @@ static void fr_demo_run_counting_semaphore_probe(void) {
     }
 }
 
+static void fr_demo_run_queue_probe(void) {
+    uint32_t value = 0u;
+
+    const uint32_t item_a = 0x11111111u;
+    const uint32_t item_b = 0x22222222u;
+    const uint32_t item_c = 0x33333333u;
+    const uint32_t item_d = 0x44444444u;
+
+    if (fr_queue_receive(&g_fr_demo_queue_probe, &value)) {
+        ++g_fr_demo_queue_probe_failures;
+    }
+
+    if (!fr_queue_send(&g_fr_demo_queue_probe, &item_a)) {
+        ++g_fr_demo_queue_probe_failures;
+    }
+
+    if (!fr_queue_send(&g_fr_demo_queue_probe, &item_b)) {
+        ++g_fr_demo_queue_probe_failures;
+    }
+
+    if (!fr_queue_send(&g_fr_demo_queue_probe, &item_c)) {
+        ++g_fr_demo_queue_probe_failures;
+    }
+
+    if (fr_queue_send(&g_fr_demo_queue_probe, &item_d)) {
+        ++g_fr_demo_queue_probe_failures;
+    }
+
+    if (!fr_queue_receive(&g_fr_demo_queue_probe, &value) ||
+        (value != item_a)) {
+        ++g_fr_demo_queue_probe_failures;
+    }
+
+    if (!fr_queue_send(&g_fr_demo_queue_probe, &item_d)) {
+        ++g_fr_demo_queue_probe_failures;
+    }
+
+    if (!fr_queue_receive(&g_fr_demo_queue_probe, &value) ||
+        (value != item_b)) {
+        ++g_fr_demo_queue_probe_failures;
+    }
+
+    if (!fr_queue_receive(&g_fr_demo_queue_probe, &value) ||
+        (value != item_c)) {
+        ++g_fr_demo_queue_probe_failures;
+    }
+
+    if (!fr_queue_receive(&g_fr_demo_queue_probe, &value) ||
+        (value != item_d)) {
+        ++g_fr_demo_queue_probe_failures;
+    }
+
+    if (fr_queue_receive(&g_fr_demo_queue_probe, &value)) {
+        ++g_fr_demo_queue_probe_failures;
+    }
+}
+
 static void fr_demo_task_a_entry(void *argument) {
     volatile uint32_t local_state = FR_DEMO_TASK_A_LOCAL_STATE_SEED;
 
@@ -535,6 +627,21 @@ static void fr_demo_task_a_entry(void *argument) {
             g_fr_demo_task_a_last_sleep_elapsed =
                 fr_tick_elapsed(sleep_start, fr_tick_now());
 
+            fr_demo_queue_message_t message = {
+                .sequence = g_fr_demo_queue_next_sequence + 1u,
+                .produced_tick = fr_tick_now()
+            };
+
+            if (fr_queue_send(&g_fr_demo_queue, &message)) {
+                g_fr_demo_queue_next_sequence = message.sequence;
+                g_fr_demo_queue_last_sent_sequence = message.sequence;
+                g_fr_demo_queue_last_produced_tick = message.produced_tick;
+
+                ++g_fr_demo_queue_send_successes;
+            } else {
+                ++g_fr_demo_queue_send_full;
+            }
+
             if (g_fr_demo_task_a_wakeups == 1u) {
                 if (fr_counting_semaphore_give(
                         &g_fr_demo_counting_semaphore)) {
@@ -664,6 +771,8 @@ static void fr_demo_task_b_entry(void *argument) {
         ++g_fr_demo_mutex_errors;
     }
 
+    fr_demo_run_queue_probe();
+
     fr_demo_run_counting_semaphore_probe();
 
     if (fr_counting_semaphore_take(
@@ -690,6 +799,28 @@ static void fr_demo_task_b_entry(void *argument) {
     }
 
     while (1) {
+
+        fr_demo_queue_message_t message;
+
+        if (fr_queue_receive(&g_fr_demo_queue, &message)) {
+            ++g_fr_demo_queue_receive_successes;
+
+            const uint32_t expected_sequence = g_fr_demo_queue_last_received_sequence + 1u;
+
+            if (message.sequence != expected_sequence) {
+                ++g_fr_demo_queue_order_errors;
+            }
+
+            g_fr_demo_queue_last_received_sequence = message.sequence;
+
+            g_fr_demo_queue_last_received_tick = fr_tick_now();
+
+            g_fr_demo_queue_last_latency =
+                fr_tick_elapsed(message.produced_tick,
+                                g_fr_demo_queue_last_received_tick);
+        } else {
+            ++g_fr_demo_queue_receive_empty;
+        }
 
         if (fr_binary_semaphore_take(&g_fr_demo_binary_semaphore, 30u)) {
             ++g_fr_demo_semaphore_take_successes;
@@ -929,6 +1060,47 @@ static _Noreturn void fr_bootstrap_entry(void) {
     }
 
     if (g_fr_demo_inversion_init_failures != 0u) {
+        while (1) {
+        }
+    }
+
+    if (fr_queue_init(&g_fr_demo_queue_invalid_probe,
+                    g_fr_demo_queue_invalid_storage,
+                    0u,
+                    sizeof(uint32_t))) {
+        ++g_fr_demo_queue_validation_failures;
+    }
+
+    if (fr_queue_init(&g_fr_demo_queue_invalid_probe,
+                    g_fr_demo_queue_invalid_storage,
+                    1u,
+                    0u)) {
+        ++g_fr_demo_queue_validation_failures;
+    }
+
+    if (fr_queue_init(&g_fr_demo_queue_invalid_probe,
+                    g_fr_demo_queue_invalid_storage,
+                    UINT32_MAX,
+                    2u)) {
+        ++g_fr_demo_queue_validation_failures;
+    }
+
+    if (!fr_queue_init(&g_fr_demo_queue,
+                        g_fr_demo_queue_storage,
+                        FR_DEMO_QUEUE_CAPACITY,
+                        (uint32_t)sizeof(fr_demo_queue_message_t))) {
+            ++g_fr_demo_queue_init_failures;
+    }
+
+    if (!fr_queue_init(&g_fr_demo_queue_probe,
+                        g_fr_demo_queue_probe_storage,
+                        FR_DEMO_QUEUE_PROBE_CAPACITY,
+                        (uint32_t)sizeof(uint32_t))) {
+            ++g_fr_demo_queue_init_failures;
+    }
+
+    if ((g_fr_demo_queue_init_failures != 0u) ||
+        (g_fr_demo_queue_validation_failures != 0u)) {
         while (1) {
         }
     }
