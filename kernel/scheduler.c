@@ -332,7 +332,9 @@ bool fr_scheduler_block_current_locked(fr_wait_reason_t reason,
                                        uint32_t timeout_ticks) {
     const bool object_wait =
         (reason == FR_WAIT_REASON_SYNC) ||
-        (reason == FR_WAIT_REASON_MUTEX);
+        (reason == FR_WAIT_REASON_MUTEX) ||
+        (reason == FR_WAIT_REASON_QUEUE_SEND) ||
+        (reason == FR_WAIT_REASON_QUEUE_RECEIVE);
 
     if (((reason != FR_WAIT_REASON_SLEEP) && !object_wait) ||
         ((reason == FR_WAIT_REASON_SLEEP) && (wait_object != NULL)) ||
@@ -399,7 +401,9 @@ fr_task_t *fr_scheduler_select_waiter_locked(fr_wait_reason_t reason,
                                              const void *wait_object) {
     if ((wait_object == NULL) ||
         ((reason != FR_WAIT_REASON_SYNC) &&
-         (reason != FR_WAIT_REASON_MUTEX))) {
+        (reason != FR_WAIT_REASON_MUTEX) &&
+        (reason != FR_WAIT_REASON_QUEUE_SEND) &&
+        (reason != FR_WAIT_REASON_QUEUE_RECEIVE))) {
         return NULL;
     }
 

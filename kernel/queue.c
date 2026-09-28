@@ -3,8 +3,12 @@
 #include <stddef.h>
 
 #include "forge/critical.h"
+#include "forge/kernel/scheduler_internal.h"
+#include "forge/kernel/task_internal.h"
+#include "forge/kernel/wait_internal.h"
 #include "forge/queue.h"
 #include "forge/scheduler.h"
+#include "forge/tick.h"
 
 #define FR_QUEUE_MAGIC 0x46525155u
 
@@ -23,6 +27,11 @@ static bool fr_queue_thread_context_allowed(void) {
            ((primask & 1u) == 0u) &&
            ((faultmask & 1u) == 0u) &&
            (basepri == 0u);
+}
+
+static bool fr_queue_timeout_valid(uint32_t timeout_ticks) {
+    return (timeout_ticks <= FR_WAIT_MAX_FINITE_TICKS) ||
+           (timeout_ticks == FR_WAIT_FOREVER);
 }
 
 static bool fr_queue_state_valid_locked(const fr_queue_t *queue) {
@@ -68,6 +77,80 @@ static void fr_queue_copy_bytes(void *destination,
     }
 }
 
+static void fr_queue_wake_waiter_locked(fr_wait_reason_t reason,
+                                        const fr_queue_t *queue) {
+    fr_task_t *const waiter =
+        fr_scheduler_select_waiter_locked(reason, queue);
+
+    if (waiter == NULL) {
+        return;
+    }
+
+    if (fr_scheduler_unblock_task_locked(
+            waiter,
+            FR_WAIT_RESULT_SIGNALED)) {
+        fr_scheduler_request_if_needed_locked();
+    }
+}
+
+static bool fr_queue_try_send_locked(fr_queue_t *queue,
+                                     const void *item) {
+    if (queue->count == queue->capacity) {
+        return false;
+    }
+
+    const uint32_t offset = queue->tail * queue->item_size;
+
+    fr_queue_copy_bytes(&queue->storage[offset],
+                        item,
+                        queue->item_size);
+
+    queue->tail =
+        fr_queue_next_index(queue->tail,
+                            queue->capacity);
+
+    ++queue->count;
+
+    /*
+     * The queue now contains at least one item.
+     * Wake one task waiting for data.
+     */
+    fr_queue_wake_waiter_locked(
+        FR_WAIT_REASON_QUEUE_RECEIVE,
+        queue);
+
+    return true;
+}
+
+static bool fr_queue_try_receive_locked(fr_queue_t *queue,
+                                        void *item) {
+    if (queue->count == 0u) {
+        return false;
+    }
+
+    const uint32_t offset = queue->head * queue->item_size;
+
+    fr_queue_copy_bytes(item,
+                        &queue->storage[offset],
+                        queue->item_size);
+
+    queue->head =
+        fr_queue_next_index(queue->head,
+                            queue->capacity);
+
+    --queue->count;
+
+    /*
+     * The queue now contains at least one free slot.
+     * Wake one task waiting to send.
+     */
+    fr_queue_wake_waiter_locked(
+        FR_WAIT_REASON_QUEUE_SEND,
+        queue);
+
+    return true;
+}
+
 bool fr_queue_init(fr_queue_t *queue,
                    void *storage,
                    uint32_t capacity,
@@ -93,78 +176,184 @@ bool fr_queue_init(fr_queue_t *queue,
     return true;
 }
 
-bool fr_queue_send(fr_queue_t *queue, const void *item) {
+bool fr_queue_send_wait(fr_queue_t *queue,
+                        const void *item,
+                        uint32_t timeout_ticks) {
     if ((queue == NULL) ||
         (item == NULL) ||
-        !fr_queue_thread_context_allowed()) {
+        !fr_queue_thread_context_allowed() ||
+        !fr_queue_timeout_valid(timeout_ticks)) {
         return false;
     }
 
-    const fr_critical_state_t critical_state = fr_critical_enter();
-    const fr_task_handle_t current_task = fr_scheduler_current_task();
+    const bool wait_forever = (timeout_ticks == FR_QUEUE_WAIT_FOREVER);
 
-    if ((critical_state != 0u) ||
-        !fr_scheduler_is_running() ||
-        (current_task == NULL) ||
-        !fr_queue_state_valid_locked(queue)) {
+    const fr_tick_t deadline =
+        wait_forever
+            ? 0u
+            : (fr_tick_now() + timeout_ticks);
+
+    for (;;) {
+        const fr_critical_state_t critical_state =
+            fr_critical_enter();
+
+        fr_task_t *const current_task =
+            fr_scheduler_current_task();
+
+        if ((critical_state != 0u) ||
+            !fr_scheduler_is_running() ||
+            (current_task == NULL) ||
+            !fr_queue_state_valid_locked(queue)) {
+            fr_critical_exit(critical_state);
+            return false;
+        }
+
+        if (fr_queue_try_send_locked(queue, item)) {
+            fr_critical_exit(critical_state);
+            return true;
+        }
+
+        if (timeout_ticks == 0u) {
+            fr_critical_exit(critical_state);
+            return false;
+        }
+
+        uint32_t wait_ticks = FR_QUEUE_WAIT_FOREVER;
+
+        if (!wait_forever) {
+            const fr_tick_t now = fr_tick_now();
+
+            if (fr_tick_deadline_reached(now, deadline)) {
+                fr_critical_exit(critical_state);
+                return false;
+            }
+
+            wait_ticks = (uint32_t)(deadline - now);
+        }
+
+        const bool blocked =
+            fr_scheduler_block_current_locked(
+                FR_WAIT_REASON_QUEUE_SEND,
+                queue,
+                wait_ticks);
+
         fr_critical_exit(critical_state);
-        return false;
+
+        if (!blocked) {
+            return false;
+        }
+
+        if (current_task->wait_result ==
+            FR_WAIT_RESULT_TIMEOUT) {
+            return false;
+        }
+
+        if (current_task->wait_result !=
+            FR_WAIT_RESULT_SIGNALED) {
+            return false;
+        }
+
+        /*
+         * Signaled does not reserve the slot. Retry while preserving
+         * the original absolute deadline.
+         */
     }
-
-    if (queue->count == queue->capacity) {
-        fr_critical_exit(critical_state);
-        return false;
-    }
-
-    const uint32_t offset = queue->tail * queue->item_size;
-
-    fr_queue_copy_bytes(&queue->storage[offset],
-                        item,
-                        queue->item_size);
-
-    queue->tail =
-        fr_queue_next_index(queue->tail, queue->capacity);
-
-    ++queue->count;
-
-    fr_critical_exit(critical_state);
-    return true;
 }
 
-bool fr_queue_receive(fr_queue_t *queue, void *item) {
+bool fr_queue_receive_wait(fr_queue_t *queue,
+                           void *item,
+                           uint32_t timeout_ticks) {
     if ((queue == NULL) ||
         (item == NULL) ||
-        !fr_queue_thread_context_allowed()) {
+        !fr_queue_thread_context_allowed() ||
+        !fr_queue_timeout_valid(timeout_ticks)) {
         return false;
     }
 
-    const fr_critical_state_t critical_state = fr_critical_enter();
-    const fr_task_handle_t current_task = fr_scheduler_current_task();
+    const bool wait_forever = (timeout_ticks == FR_QUEUE_WAIT_FOREVER);
 
-    if ((critical_state != 0u) ||
-        !fr_scheduler_is_running() ||
-        (current_task == NULL) ||
-        !fr_queue_state_valid_locked(queue)) {
+    const fr_tick_t deadline =
+        wait_forever
+            ? 0u
+            : (fr_tick_now() + timeout_ticks);
+
+    for (;;) {
+        const fr_critical_state_t critical_state =
+            fr_critical_enter();
+
+        fr_task_t *const current_task =
+            fr_scheduler_current_task();
+
+        if ((critical_state != 0u) ||
+            !fr_scheduler_is_running() ||
+            (current_task == NULL) ||
+            !fr_queue_state_valid_locked(queue)) {
+            fr_critical_exit(critical_state);
+            return false;
+        }
+
+        if (fr_queue_try_receive_locked(queue, item)) {
+            fr_critical_exit(critical_state);
+            return true;
+        }
+
+        if (timeout_ticks == 0u) {
+            fr_critical_exit(critical_state);
+            return false;
+        }
+
+        uint32_t wait_ticks = FR_QUEUE_WAIT_FOREVER;
+
+        if (!wait_forever) {
+            const fr_tick_t now = fr_tick_now();
+
+            if (fr_tick_deadline_reached(now, deadline)) {
+                fr_critical_exit(critical_state);
+                return false;
+            }
+
+            wait_ticks = (uint32_t)(deadline - now);
+        }
+
+        const bool blocked =
+            fr_scheduler_block_current_locked(
+                FR_WAIT_REASON_QUEUE_RECEIVE,
+                queue,
+                wait_ticks);
+
         fr_critical_exit(critical_state);
-        return false;
+
+        if (!blocked) {
+            return false;
+        }
+
+        if (current_task->wait_result ==
+            FR_WAIT_RESULT_TIMEOUT) {
+            return false;
+        }
+
+        if (current_task->wait_result !=
+            FR_WAIT_RESULT_SIGNALED) {
+            return false;
+        }
+
+        /*
+         * Signaled does not reserve an item. Retry while preserving
+         * the original absolute deadline.
+         */
     }
+}
 
-    if (queue->count == 0u) {
-        fr_critical_exit(critical_state);
-        return false;
-    }
+bool fr_queue_send(fr_queue_t *queue,
+                   const void *item) {
+    return fr_queue_send_wait(queue,
+                              item,
+                              0u);
+}
 
-    const uint32_t offset = queue->head * queue->item_size;
-
-    fr_queue_copy_bytes(item,
-                        &queue->storage[offset],
-                        queue->item_size);
-
-    queue->head =
-        fr_queue_next_index(queue->head, queue->capacity);
-
-    --queue->count;
-
-    fr_critical_exit(critical_state);
-    return true;
+bool fr_queue_receive(fr_queue_t *queue,
+                      void *item) {
+    return fr_queue_receive_wait(queue,
+                                 item,
+                                 0u);
 }

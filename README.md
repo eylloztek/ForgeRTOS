@@ -32,7 +32,7 @@ Rather than relying on an existing RTOS or CMSIS-RTOS layer, ForgeRTOS implement
 - ~~Add a reproducible priority-inversion test.~~
 - ~~Implement mutex priority inheritance.~~
 - ~~Add kernel message queues.~~
-- Implement blocking queue send and receive operations.
+- ~~Implement blocking queue send and receive operations.~~
 - Add task event flags.
 - Add timeout support to kernel synchronization and IPC objects.
 - Add task stack watermark and overflow diagnostics.

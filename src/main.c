@@ -58,6 +58,13 @@
 #define FR_DEMO_QUEUE_CAPACITY       4u
 #define FR_DEMO_QUEUE_PROBE_CAPACITY 3u
 
+#define FR_DEMO_BLOCKING_QUEUE_CAPACITY        1u
+#define FR_DEMO_BLOCKING_QUEUE_TIMEOUT_TICKS   2u
+
+#define FR_DEMO_BLOCKING_QUEUE_VALUE_A   0xA5A50001u
+#define FR_DEMO_BLOCKING_QUEUE_VALUE_B1  0xB5B50001u
+#define FR_DEMO_BLOCKING_QUEUE_VALUE_B2  0xB5B50002u
+
 _Alignas(8) uint32_t g_fr_demo_bootstrap_stack[FR_DEMO_BOOTSTRAP_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_a_stack[FR_DEMO_TASK_A_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_b_stack[FR_DEMO_TASK_B_STACK_WORDS];
@@ -248,6 +255,28 @@ volatile uint32_t g_fr_demo_queue_last_received_sequence;
 volatile uint32_t g_fr_demo_queue_last_produced_tick;
 volatile uint32_t g_fr_demo_queue_last_received_tick;
 volatile uint32_t g_fr_demo_queue_last_latency;
+
+static fr_queue_t g_fr_demo_blocking_queue;
+
+static uint32_t
+    g_fr_demo_blocking_queue_storage[
+        FR_DEMO_BLOCKING_QUEUE_CAPACITY];
+
+volatile uint32_t g_fr_demo_blocking_queue_init_failures;
+volatile uint32_t g_fr_demo_blocking_queue_errors;
+volatile uint32_t g_fr_demo_blocking_queue_data_errors;
+
+volatile uint32_t g_fr_demo_blocking_queue_receive_timeout_observed;
+volatile uint32_t g_fr_demo_blocking_queue_receive_wait_successes;
+volatile uint32_t g_fr_demo_blocking_queue_send_timeout_observed;
+
+volatile uint32_t g_fr_demo_blocking_queue_send_wait_successes;
+volatile uint32_t g_fr_demo_blocking_queue_release_send_successes;
+volatile uint32_t g_fr_demo_blocking_queue_release_receive_successes;
+volatile uint32_t g_fr_demo_blocking_queue_receive_waiting;
+volatile uint32_t g_fr_demo_blocking_queue_send_waiting;
+volatile uint32_t g_fr_demo_blocking_queue_receive_released;
+volatile uint32_t g_fr_demo_blocking_queue_send_released;
 
 _Static_assert((FR_DEMO_BOOTSTRAP_STACK_WORDS % 2u) == 0u, "Bootstrap stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_A_STACK_WORDS % 2u) == 0u, "Task A stack size must preserve 8-byte alignment");
@@ -605,6 +634,37 @@ static void fr_demo_task_a_entry(void *argument) {
     }
 
     while (1) {
+
+        if ((g_fr_demo_blocking_queue_receive_waiting != 0u) &&
+            (g_fr_demo_blocking_queue_receive_released == 0u)) {
+            const uint32_t value = FR_DEMO_BLOCKING_QUEUE_VALUE_A;
+
+            if (fr_queue_send(&g_fr_demo_blocking_queue,
+                            &value)) {
+                g_fr_demo_blocking_queue_receive_released = 1u;
+                ++g_fr_demo_blocking_queue_release_send_successes;
+            } else {
+                ++g_fr_demo_blocking_queue_errors;
+            }
+        }
+
+        if ((g_fr_demo_blocking_queue_send_waiting != 0u) &&
+            (g_fr_demo_blocking_queue_send_released == 0u)) {
+            uint32_t value = 0u;
+
+            if (fr_queue_receive(&g_fr_demo_blocking_queue,
+                                &value)) {
+                g_fr_demo_blocking_queue_send_released = 1u;
+                ++g_fr_demo_blocking_queue_release_receive_successes;
+
+                if (value != FR_DEMO_BLOCKING_QUEUE_VALUE_B1) {
+                    ++g_fr_demo_blocking_queue_data_errors;
+                }
+            } else {
+                ++g_fr_demo_blocking_queue_errors;
+            }
+        }
+
         ++g_fr_demo_task_a_iterations;
 
         local_state = fr_demo_advance_local_state(local_state);
@@ -769,6 +829,96 @@ static void fr_demo_task_b_entry(void *argument) {
         }
     } else {
         ++g_fr_demo_mutex_errors;
+    }
+
+    uint32_t blocking_value = 0u;
+
+    /*
+    * 1. Empty queue + finite receive timeout.
+    */
+    if (!fr_queue_receive_wait(
+            &g_fr_demo_blocking_queue,
+            &blocking_value,
+            FR_DEMO_BLOCKING_QUEUE_TIMEOUT_TICKS)) {
+        ++g_fr_demo_blocking_queue_receive_timeout_observed;
+    } else {
+        ++g_fr_demo_blocking_queue_errors;
+    }
+
+    /*
+    * 2. Empty queue + infinite receive.
+    * Task A will send one item and wake B.
+    */
+    g_fr_demo_blocking_queue_receive_waiting = 1u;
+
+    if (fr_queue_receive_wait(
+            &g_fr_demo_blocking_queue,
+            &blocking_value,
+            FR_QUEUE_WAIT_FOREVER)) {
+        ++g_fr_demo_blocking_queue_receive_wait_successes;
+
+        if (blocking_value !=
+            FR_DEMO_BLOCKING_QUEUE_VALUE_A) {
+            ++g_fr_demo_blocking_queue_data_errors;
+        }
+    } else {
+        ++g_fr_demo_blocking_queue_errors;
+    }
+
+    g_fr_demo_blocking_queue_receive_waiting = 0u;
+
+    /*
+    * 3. Fill the capacity-1 queue.
+    */
+    const uint32_t first_send = FR_DEMO_BLOCKING_QUEUE_VALUE_B1;
+
+    const uint32_t second_send = FR_DEMO_BLOCKING_QUEUE_VALUE_B2;
+
+    if (!fr_queue_send(&g_fr_demo_blocking_queue,
+                        &first_send)) {
+        ++g_fr_demo_blocking_queue_errors;
+    }
+
+    /*
+    * 4. Full queue + finite send timeout.
+    */
+    if (!fr_queue_send_wait(
+            &g_fr_demo_blocking_queue,
+            &second_send,
+            FR_DEMO_BLOCKING_QUEUE_TIMEOUT_TICKS)) {
+        ++g_fr_demo_blocking_queue_send_timeout_observed;
+    } else {
+        ++g_fr_demo_blocking_queue_errors;
+    }
+
+    /*
+    * 5. Full queue + infinite send.
+    * Task A will receive B1 and wake B.
+    */
+    g_fr_demo_blocking_queue_send_waiting = 1u;
+
+    if (fr_queue_send_wait(
+            &g_fr_demo_blocking_queue,
+            &second_send,
+            FR_QUEUE_WAIT_FOREVER)) {
+        ++g_fr_demo_blocking_queue_send_wait_successes;
+    } else {
+        ++g_fr_demo_blocking_queue_errors;
+    }
+
+    g_fr_demo_blocking_queue_send_waiting = 0u;
+
+    /*
+    * 6. B2 must now be the only queued item.
+    */
+    blocking_value = 0u;
+
+    if (!fr_queue_receive(&g_fr_demo_blocking_queue,
+                        &blocking_value)) {
+        ++g_fr_demo_blocking_queue_errors;
+    } else if (blocking_value !=
+            FR_DEMO_BLOCKING_QUEUE_VALUE_B2) {
+        ++g_fr_demo_blocking_queue_data_errors;
     }
 
     fr_demo_run_queue_probe();
@@ -1101,6 +1251,19 @@ static _Noreturn void fr_bootstrap_entry(void) {
 
     if ((g_fr_demo_queue_init_failures != 0u) ||
         (g_fr_demo_queue_validation_failures != 0u)) {
+        while (1) {
+        }
+    }
+
+    if (!fr_queue_init(
+            &g_fr_demo_blocking_queue,
+            g_fr_demo_blocking_queue_storage,
+            FR_DEMO_BLOCKING_QUEUE_CAPACITY,
+            (uint32_t)sizeof(uint32_t))) {
+        ++g_fr_demo_blocking_queue_init_failures;
+    }
+
+    if (g_fr_demo_blocking_queue_init_failures != 0u) {
         while (1) {
         }
     }
