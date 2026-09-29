@@ -28,6 +28,11 @@ struct fr_task {
     fr_wait_reason_t wait_reason;
     volatile fr_wait_result_t wait_result;
     bool wait_has_deadline;
+
+    uint32_t wait_flags_mask;
+    uint32_t wait_flags_result;
+    bool wait_flags_all;
+    bool wait_flags_clear_on_exit;
 };
 
 uint32_t fr_task_internal_count(void);

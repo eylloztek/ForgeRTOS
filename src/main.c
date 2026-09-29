@@ -6,6 +6,7 @@
 #include "forge/arch/fault.h"
 #include "forge/arch/systick.h"
 #include "forge/board.h"
+#include "forge/event_flags.h"
 #include "forge/scheduler.h"
 #include "forge/semaphore.h"
 #include "forge/mutex.h"
@@ -64,6 +65,14 @@
 #define FR_DEMO_BLOCKING_QUEUE_VALUE_A   0xA5A50001u
 #define FR_DEMO_BLOCKING_QUEUE_VALUE_B1  0xB5B50001u
 #define FR_DEMO_BLOCKING_QUEUE_VALUE_B2  0xB5B50002u
+
+#define FR_DEMO_EVENT_FLAG_A (1u << 0)
+#define FR_DEMO_EVENT_FLAG_B (1u << 1)
+
+#define FR_DEMO_EVENT_FLAGS_AB \
+    (FR_DEMO_EVENT_FLAG_A | FR_DEMO_EVENT_FLAG_B)
+
+#define FR_DEMO_EVENT_FLAGS_TIMEOUT_TICKS 2u
 
 _Alignas(8) uint32_t g_fr_demo_bootstrap_stack[FR_DEMO_BOOTSTRAP_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_a_stack[FR_DEMO_TASK_A_STACK_WORDS];
@@ -277,6 +286,29 @@ volatile uint32_t g_fr_demo_blocking_queue_receive_waiting;
 volatile uint32_t g_fr_demo_blocking_queue_send_waiting;
 volatile uint32_t g_fr_demo_blocking_queue_receive_released;
 volatile uint32_t g_fr_demo_blocking_queue_send_released;
+
+static fr_event_flags_t g_fr_demo_event_flags;
+
+volatile uint32_t g_fr_demo_event_flags_init_failures;
+volatile uint32_t g_fr_demo_event_flags_errors;
+volatile uint32_t g_fr_demo_event_flags_data_errors;
+
+volatile uint32_t g_fr_demo_event_flags_timeout_observed;
+volatile uint32_t g_fr_demo_event_flags_wait_any_successes;
+volatile uint32_t g_fr_demo_event_flags_wait_all_successes;
+
+volatile uint32_t g_fr_demo_event_flags_set_successes;
+volatile uint32_t g_fr_demo_event_flags_clear_successes;
+
+volatile uint32_t g_fr_demo_event_flags_any_requested;
+volatile uint32_t g_fr_demo_event_flags_any_released;
+
+volatile uint32_t g_fr_demo_event_flags_all_requested;
+volatile uint32_t g_fr_demo_event_flags_all_stage;
+
+volatile uint32_t g_fr_demo_event_flags_any_match;
+volatile uint32_t g_fr_demo_event_flags_all_match;
+volatile uint32_t g_fr_demo_event_flags_final_bits;
 
 _Static_assert((FR_DEMO_BOOTSTRAP_STACK_WORDS % 2u) == 0u, "Bootstrap stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_A_STACK_WORDS % 2u) == 0u, "Task A stack size must preserve 8-byte alignment");
@@ -653,7 +685,7 @@ static void fr_demo_task_a_entry(void *argument) {
             uint32_t value = 0u;
 
             if (fr_queue_receive(&g_fr_demo_blocking_queue,
-                                &value)) {
+                                 &value)) {
                 g_fr_demo_blocking_queue_send_released = 1u;
                 ++g_fr_demo_blocking_queue_release_receive_successes;
 
@@ -662,6 +694,40 @@ static void fr_demo_task_a_entry(void *argument) {
                 }
             } else {
                 ++g_fr_demo_blocking_queue_errors;
+            }
+        }
+
+        if ((g_fr_demo_event_flags_any_requested != 0u) &&
+            (g_fr_demo_event_flags_any_released == 0u)) {
+            if (fr_event_flags_set(
+                    &g_fr_demo_event_flags,
+                    FR_DEMO_EVENT_FLAG_A)) {
+                ++g_fr_demo_event_flags_set_successes;
+                g_fr_demo_event_flags_any_released = 1u;
+            } else {
+                ++g_fr_demo_event_flags_errors;
+            }
+        }
+
+        if ((g_fr_demo_event_flags_all_requested != 0u) &&
+            (g_fr_demo_event_flags_all_stage == 0u)) {
+            if (fr_event_flags_set(
+                    &g_fr_demo_event_flags,
+                    FR_DEMO_EVENT_FLAG_A)) {
+                ++g_fr_demo_event_flags_set_successes;
+                g_fr_demo_event_flags_all_stage = 1u;
+            } else {
+                ++g_fr_demo_event_flags_errors;
+            }
+        } else if ((g_fr_demo_event_flags_all_requested != 0u) &&
+                   (g_fr_demo_event_flags_all_stage == 1u)) {
+            if (fr_event_flags_set(
+                    &g_fr_demo_event_flags,
+                    FR_DEMO_EVENT_FLAG_B)) {
+                ++g_fr_demo_event_flags_set_successes;
+                g_fr_demo_event_flags_all_stage = 2u;
+            } else {
+                ++g_fr_demo_event_flags_errors;
             }
         }
 
@@ -914,11 +980,130 @@ static void fr_demo_task_b_entry(void *argument) {
     blocking_value = 0u;
 
     if (!fr_queue_receive(&g_fr_demo_blocking_queue,
-                        &blocking_value)) {
+                          &blocking_value)) {
         ++g_fr_demo_blocking_queue_errors;
     } else if (blocking_value !=
-            FR_DEMO_BLOCKING_QUEUE_VALUE_B2) {
+               FR_DEMO_BLOCKING_QUEUE_VALUE_B2) {
         ++g_fr_demo_blocking_queue_data_errors;
+    }
+
+    uint32_t matched_flags = 0u;
+    uint32_t flags_snapshot = 0u;
+
+    /*
+     * 1. Finite timeout: A is not set.
+     */
+    if (!fr_event_flags_wait(
+            &g_fr_demo_event_flags,
+            FR_DEMO_EVENT_FLAG_A,
+            true,
+            false,
+            FR_DEMO_EVENT_FLAGS_TIMEOUT_TICKS,
+            &matched_flags)) {
+        ++g_fr_demo_event_flags_timeout_observed;
+
+        if (matched_flags != 0u) {
+            ++g_fr_demo_event_flags_data_errors;
+        }
+    } else {
+        ++g_fr_demo_event_flags_errors;
+    }
+
+    /*
+     * 2. Wait for ANY of A or B.
+     * Task A will set A.
+     */
+    g_fr_demo_event_flags_any_requested = 1u;
+    matched_flags = 0u;
+
+    if (fr_event_flags_wait(
+            &g_fr_demo_event_flags,
+            FR_DEMO_EVENT_FLAGS_AB,
+            false,
+            false,
+            FR_EVENT_FLAGS_WAIT_FOREVER,
+            &matched_flags)) {
+        ++g_fr_demo_event_flags_wait_any_successes;
+        g_fr_demo_event_flags_any_match = matched_flags;
+
+        if (matched_flags != FR_DEMO_EVENT_FLAG_A) {
+            ++g_fr_demo_event_flags_data_errors;
+        }
+    } else {
+        ++g_fr_demo_event_flags_errors;
+    }
+
+    g_fr_demo_event_flags_any_requested = 0u;
+
+    /*
+     * clear_on_exit was false, so A must still be set.
+     */
+    if (!fr_event_flags_get(
+            &g_fr_demo_event_flags,
+            &flags_snapshot) ||
+        (flags_snapshot != FR_DEMO_EVENT_FLAG_A)) {
+        ++g_fr_demo_event_flags_data_errors;
+    }
+
+    /*
+     * Explicitly clear A before the wait-all test.
+     */
+    if (fr_event_flags_clear(
+            &g_fr_demo_event_flags,
+            FR_DEMO_EVENT_FLAG_A)) {
+        ++g_fr_demo_event_flags_clear_successes;
+    } else {
+        ++g_fr_demo_event_flags_errors;
+    }
+
+    if (!fr_event_flags_get(
+            &g_fr_demo_event_flags,
+            &flags_snapshot) ||
+        (flags_snapshot != 0u)) {
+        ++g_fr_demo_event_flags_data_errors;
+    }
+
+    /*
+     * 3. Wait for ALL: A and B.
+     *
+     * Task A first sets A. B must remain blocked.
+     * On the next A iteration, B is set and the condition becomes true.
+     *
+     * clear_on_exit is true, so both bits must be clear after wake-up.
+     */
+    g_fr_demo_event_flags_all_requested = 1u;
+    g_fr_demo_event_flags_all_stage = 0u;
+    matched_flags = 0u;
+
+    if (fr_event_flags_wait(
+            &g_fr_demo_event_flags,
+            FR_DEMO_EVENT_FLAGS_AB,
+            true,
+            true,
+            FR_EVENT_FLAGS_WAIT_FOREVER,
+            &matched_flags)) {
+        ++g_fr_demo_event_flags_wait_all_successes;
+        g_fr_demo_event_flags_all_match = matched_flags;
+
+        if (matched_flags != FR_DEMO_EVENT_FLAGS_AB) {
+            ++g_fr_demo_event_flags_data_errors;
+        }
+    } else {
+        ++g_fr_demo_event_flags_errors;
+    }
+
+    g_fr_demo_event_flags_all_requested = 0u;
+
+    if (!fr_event_flags_get(
+            &g_fr_demo_event_flags,
+            &flags_snapshot)) {
+        ++g_fr_demo_event_flags_errors;
+    } else {
+        g_fr_demo_event_flags_final_bits = flags_snapshot;
+
+        if (flags_snapshot != 0u) {
+            ++g_fr_demo_event_flags_data_errors;
+        }
     }
 
     fr_demo_run_queue_probe();
@@ -1264,6 +1449,15 @@ static _Noreturn void fr_bootstrap_entry(void) {
     }
 
     if (g_fr_demo_blocking_queue_init_failures != 0u) {
+        while (1) {
+        }
+    }
+
+    if (!fr_event_flags_init(&g_fr_demo_event_flags)) {
+        ++g_fr_demo_event_flags_init_failures;
+    }
+
+    if (g_fr_demo_event_flags_init_failures != 0u) {
         while (1) {
         }
     }

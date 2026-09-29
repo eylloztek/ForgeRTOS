@@ -126,6 +126,11 @@ fr_task_status_t fr_task_create(fr_task_handle_t *out_task, const fr_task_config
 
     task->state = FR_TASK_STATE_CREATED;
 
+    task->wait_flags_mask = 0u;
+    task->wait_flags_result = 0u;
+    task->wait_flags_all = false;
+    task->wait_flags_clear_on_exit = false;
+
     g_fr_task_count = index + 1u;
 
     fr_critical_exit(reserve_state);

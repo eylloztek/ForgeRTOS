@@ -77,6 +77,11 @@ static void fr_scheduler_initialize_idle(void) {
     idle->wait_result = FR_WAIT_RESULT_PENDING;
     idle->wait_has_deadline = false;
 
+    idle->wait_flags_mask = 0u;
+    idle->wait_flags_result = 0u;
+    idle->wait_flags_all = false;
+    idle->wait_flags_clear_on_exit = false;
+
     idle->state = FR_TASK_STATE_READY;
 }
 
@@ -334,7 +339,8 @@ bool fr_scheduler_block_current_locked(fr_wait_reason_t reason,
         (reason == FR_WAIT_REASON_SYNC) ||
         (reason == FR_WAIT_REASON_MUTEX) ||
         (reason == FR_WAIT_REASON_QUEUE_SEND) ||
-        (reason == FR_WAIT_REASON_QUEUE_RECEIVE);
+        (reason == FR_WAIT_REASON_QUEUE_RECEIVE) ||
+        (reason == FR_WAIT_REASON_EVENT_FLAGS);
 
     if (((reason != FR_WAIT_REASON_SLEEP) && !object_wait) ||
         ((reason == FR_WAIT_REASON_SLEEP) && (wait_object != NULL)) ||
@@ -387,6 +393,10 @@ bool fr_scheduler_unblock_task_locked(fr_task_t *task,
     task->wait_object = NULL;
     task->wait_has_deadline = false;
     task->wait_deadline = 0u;
+
+    task->wait_flags_mask = 0u;
+    task->wait_flags_all = false;
+    task->wait_flags_clear_on_exit = false;
 
     if (task == g_fr_scheduler_current_task) {
         task->state = FR_TASK_STATE_RUNNING;
