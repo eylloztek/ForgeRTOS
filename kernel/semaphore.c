@@ -6,6 +6,7 @@
 #include "forge/kernel/scheduler_internal.h"
 #include "forge/kernel/task_internal.h"
 #include "forge/kernel/wait_internal.h"
+#include "forge/kernel/wait_timeout_internal.h"
 #include "forge/scheduler.h"
 #include "forge/semaphore.h"
 
@@ -29,18 +30,20 @@ static bool fr_semaphore_thread_context_allowed(void) {
            (basepri == 0u);
 }
 
-static bool fr_semaphore_timeout_valid(uint32_t timeout_ticks) {
-    return (timeout_ticks <= FR_WAIT_MAX_FINITE_TICKS) ||
-           (timeout_ticks == FR_WAIT_FOREVER);
-}
-
 static bool fr_semaphore_take_common(uint32_t *count,
                                      const void *wait_object,
                                      uint32_t timeout_ticks) {
     if ((count == NULL) ||
         (wait_object == NULL) ||
-        !fr_semaphore_thread_context_allowed() ||
-        !fr_semaphore_timeout_valid(timeout_ticks)) {
+        !fr_semaphore_thread_context_allowed()) {
+        return false;
+    }
+
+    fr_wait_timeout_t timeout;
+
+    if (!fr_wait_timeout_start(
+            &timeout,
+            timeout_ticks)) {
         return false;
     }
 
@@ -60,7 +63,11 @@ static bool fr_semaphore_take_common(uint32_t *count,
         return true;
     }
 
-    if (timeout_ticks == 0u) {
+    uint32_t wait_ticks;
+
+    if (!fr_wait_timeout_remaining(
+            &timeout,
+            &wait_ticks)) {
         fr_critical_exit(critical_state);
         return false;
     }
@@ -68,7 +75,7 @@ static bool fr_semaphore_take_common(uint32_t *count,
     const bool blocked =
         fr_scheduler_block_current_locked(FR_WAIT_REASON_SYNC,
                                           wait_object,
-                                          timeout_ticks);
+                                          wait_ticks);
 
     fr_critical_exit(critical_state);
 

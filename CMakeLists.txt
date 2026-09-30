@@ -17,6 +17,7 @@ add_executable(${TARGET}
     kernel/mutex.c
     kernel/queue.c
     kernel/event_flags.c
+    kernel/wait_timeout.c
     kernel/task.c
     kernel/tick.c
     port/cortex_m4/context_probe.S

@@ -7,6 +7,7 @@
 #include "forge/kernel/scheduler_internal.h"
 #include "forge/kernel/task_internal.h"
 #include "forge/kernel/wait_internal.h"
+#include "forge/kernel/wait_timeout_internal.h"
 #include "forge/mutex.h"
 #include "forge/scheduler.h"
 
@@ -27,11 +28,6 @@ static bool fr_mutex_thread_context_allowed(void) {
            ((primask & 1u) == 0u) &&
            ((faultmask & 1u) == 0u) &&
            (basepri == 0u);
-}
-
-static bool fr_mutex_timeout_valid(uint32_t timeout_ticks) {
-    return (timeout_ticks <= FR_WAIT_MAX_FINITE_TICKS) ||
-           (timeout_ticks == FR_WAIT_FOREVER);
 }
 
 static fr_task_priority_t fr_mutex_compute_effective_priority_locked(
@@ -165,15 +161,26 @@ bool fr_mutex_init(fr_mutex_t *mutex) {
     return true;
 }
 
-bool fr_mutex_lock(fr_mutex_t *mutex, uint32_t timeout_ticks) {
+bool fr_mutex_lock(fr_mutex_t *mutex,
+                   uint32_t timeout_ticks) {
     if ((mutex == NULL) ||
-        !fr_mutex_thread_context_allowed() ||
-        !fr_mutex_timeout_valid(timeout_ticks)) {
+        !fr_mutex_thread_context_allowed()) {
         return false;
     }
 
-    const fr_critical_state_t critical_state = fr_critical_enter();
-    fr_task_t *const current_task = fr_scheduler_current_task();
+    fr_wait_timeout_t timeout;
+
+    if (!fr_wait_timeout_start(
+            &timeout,
+            timeout_ticks)) {
+        return false;
+    }
+
+    const fr_critical_state_t critical_state =
+        fr_critical_enter();
+
+    fr_task_t *const current_task =
+        fr_scheduler_current_task();
 
     if ((critical_state != 0u) ||
         (mutex->magic != FR_MUTEX_MAGIC) ||
@@ -195,7 +202,11 @@ bool fr_mutex_lock(fr_mutex_t *mutex, uint32_t timeout_ticks) {
         return false;
     }
 
-    if (timeout_ticks == 0u) {
+    uint32_t wait_ticks;
+
+    if (!fr_wait_timeout_remaining(
+            &timeout,
+            &wait_ticks)) {
         fr_critical_exit(critical_state);
         return false;
     }
@@ -203,19 +214,22 @@ bool fr_mutex_lock(fr_mutex_t *mutex, uint32_t timeout_ticks) {
     fr_task_t *const owner = mutex->owner;
 
     const bool blocked =
-        fr_scheduler_block_current_locked(FR_WAIT_REASON_MUTEX,
-                                          mutex,
-                                          timeout_ticks);
+        fr_scheduler_block_current_locked(
+            FR_WAIT_REASON_MUTEX,
+            mutex,
+            wait_ticks);
 
     if (blocked) {
-        fr_mutex_inherit_priority_chain_locked(owner,
-                                               current_task->priority);
+        fr_mutex_inherit_priority_chain_locked(
+            owner,
+            current_task->priority);
     }
 
     fr_critical_exit(critical_state);
 
     return blocked &&
-           (current_task->wait_result == FR_WAIT_RESULT_SIGNALED) &&
+           (current_task->wait_result ==
+            FR_WAIT_RESULT_SIGNALED) &&
            (mutex->owner == current_task);
 }
 

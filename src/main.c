@@ -74,6 +74,8 @@
 
 #define FR_DEMO_EVENT_FLAGS_TIMEOUT_TICKS 2u
 
+#define FR_DEMO_IPC_TIMEOUT_TICKS 3u
+
 _Alignas(8) uint32_t g_fr_demo_bootstrap_stack[FR_DEMO_BOOTSTRAP_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_a_stack[FR_DEMO_TASK_A_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_b_stack[FR_DEMO_TASK_B_STACK_WORDS];
@@ -310,6 +312,29 @@ volatile uint32_t g_fr_demo_event_flags_any_match;
 volatile uint32_t g_fr_demo_event_flags_all_match;
 volatile uint32_t g_fr_demo_event_flags_final_bits;
 
+static fr_binary_semaphore_t g_fr_demo_ipc_timeout_binary;
+static fr_counting_semaphore_t g_fr_demo_ipc_timeout_counting;
+
+volatile uint32_t g_fr_demo_ipc_timeout_init_failures;
+volatile uint32_t g_fr_demo_ipc_timeout_errors;
+
+volatile uint32_t g_fr_demo_ipc_timeout_binary_observed;
+volatile uint32_t g_fr_demo_ipc_timeout_counting_observed;
+
+volatile uint32_t g_fr_demo_ipc_timeout_binary_verified;
+volatile uint32_t g_fr_demo_ipc_timeout_counting_verified;
+volatile uint32_t g_fr_demo_ipc_timeout_mutex_verified;
+volatile uint32_t g_fr_demo_ipc_timeout_queue_receive_verified;
+volatile uint32_t g_fr_demo_ipc_timeout_queue_send_verified;
+volatile uint32_t g_fr_demo_ipc_timeout_event_flags_verified;
+
+volatile uint32_t g_fr_demo_ipc_timeout_binary_elapsed;
+volatile uint32_t g_fr_demo_ipc_timeout_counting_elapsed;
+volatile uint32_t g_fr_demo_ipc_timeout_mutex_elapsed;
+volatile uint32_t g_fr_demo_ipc_timeout_queue_receive_elapsed;
+volatile uint32_t g_fr_demo_ipc_timeout_queue_send_elapsed;
+volatile uint32_t g_fr_demo_ipc_timeout_event_flags_elapsed;
+
 _Static_assert((FR_DEMO_BOOTSTRAP_STACK_WORDS % 2u) == 0u, "Bootstrap stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_A_STACK_WORDS % 2u) == 0u, "Task A stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_B_STACK_WORDS % 2u) == 0u, "Task B stack size must preserve 8-byte alignment");
@@ -420,6 +445,22 @@ static uint32_t fr_demo_test_timeout_math(void) {
     return failures;
 }
 
+static bool fr_demo_timeout_elapsed_at_least(
+    fr_tick_t start,
+    uint32_t minimum_ticks,
+    volatile uint32_t *elapsed_out) {
+    if (elapsed_out == NULL) {
+        return false;
+    }
+
+    const uint32_t elapsed = fr_tick_elapsed(start, fr_tick_now());
+
+    *elapsed_out = elapsed;
+
+    return elapsed >= minimum_ticks;
+}
+
+
 static void fr_demo_run_semaphore_probe(void) {
     if (!fr_binary_semaphore_take(&g_fr_demo_semaphore_probe, 0u)) {
         ++g_fr_demo_semaphore_probe_failures;
@@ -486,6 +527,46 @@ static void fr_demo_run_counting_semaphore_probe(void) {
     if (fr_counting_semaphore_take(&g_fr_demo_counting_probe, 0u) ||
         (g_fr_demo_counting_probe.count != 0u)) {
         ++g_fr_demo_counting_probe_failures;
+    }
+}
+
+static void fr_demo_run_ipc_timeout_probe(void) {
+    fr_tick_t start = fr_tick_now();
+
+    if (!fr_binary_semaphore_take(
+            &g_fr_demo_ipc_timeout_binary,
+            FR_DEMO_IPC_TIMEOUT_TICKS)) {
+        ++g_fr_demo_ipc_timeout_binary_observed;
+
+        if (fr_demo_timeout_elapsed_at_least(
+                start,
+                FR_DEMO_IPC_TIMEOUT_TICKS,
+                &g_fr_demo_ipc_timeout_binary_elapsed)) {
+            g_fr_demo_ipc_timeout_binary_verified = 1u;
+        } else {
+            ++g_fr_demo_ipc_timeout_errors;
+        }
+    } else {
+        ++g_fr_demo_ipc_timeout_errors;
+    }
+
+    start = fr_tick_now();
+
+    if (!fr_counting_semaphore_take(
+            &g_fr_demo_ipc_timeout_counting,
+            FR_DEMO_IPC_TIMEOUT_TICKS)) {
+        ++g_fr_demo_ipc_timeout_counting_observed;
+
+        if (fr_demo_timeout_elapsed_at_least(
+                start,
+                FR_DEMO_IPC_TIMEOUT_TICKS,
+                &g_fr_demo_ipc_timeout_counting_elapsed)) {
+            g_fr_demo_ipc_timeout_counting_verified = 1u;
+        } else {
+            ++g_fr_demo_ipc_timeout_errors;
+        }
+    } else {
+        ++g_fr_demo_ipc_timeout_errors;
     }
 }
 
@@ -864,9 +945,20 @@ static void fr_demo_task_b_entry(void *argument) {
         ++g_fr_demo_inversion_errors;
     }
 
+    const fr_tick_t mutex_timeout_start = fr_tick_now();
+
     if (!fr_mutex_lock(&g_fr_demo_mutex_timeout_probe,
                         FR_DEMO_MUTEX_TIMEOUT_TICKS)) {
         ++g_fr_demo_mutex_b_timeout_observed;
+
+        if (fr_demo_timeout_elapsed_at_least(
+                mutex_timeout_start,
+                FR_DEMO_MUTEX_TIMEOUT_TICKS,
+                &g_fr_demo_ipc_timeout_mutex_elapsed)) {
+            g_fr_demo_ipc_timeout_mutex_verified = 1u;
+        } else {
+            ++g_fr_demo_ipc_timeout_errors;
+        }
     } else {
         ++g_fr_demo_mutex_errors;
 
@@ -902,11 +994,23 @@ static void fr_demo_task_b_entry(void *argument) {
     /*
     * 1. Empty queue + finite receive timeout.
     */
+    const fr_tick_t queue_receive_timeout_start =
+        fr_tick_now();
+
     if (!fr_queue_receive_wait(
             &g_fr_demo_blocking_queue,
             &blocking_value,
             FR_DEMO_BLOCKING_QUEUE_TIMEOUT_TICKS)) {
         ++g_fr_demo_blocking_queue_receive_timeout_observed;
+
+        if (fr_demo_timeout_elapsed_at_least(
+                queue_receive_timeout_start,
+                FR_DEMO_BLOCKING_QUEUE_TIMEOUT_TICKS,
+                &g_fr_demo_ipc_timeout_queue_receive_elapsed)) {
+            g_fr_demo_ipc_timeout_queue_receive_verified = 1u;
+        } else {
+            ++g_fr_demo_ipc_timeout_errors;
+        }
     } else {
         ++g_fr_demo_blocking_queue_errors;
     }
@@ -948,11 +1052,23 @@ static void fr_demo_task_b_entry(void *argument) {
     /*
     * 4. Full queue + finite send timeout.
     */
+    const fr_tick_t queue_send_timeout_start =
+        fr_tick_now();
+
     if (!fr_queue_send_wait(
             &g_fr_demo_blocking_queue,
             &second_send,
             FR_DEMO_BLOCKING_QUEUE_TIMEOUT_TICKS)) {
         ++g_fr_demo_blocking_queue_send_timeout_observed;
+
+        if (fr_demo_timeout_elapsed_at_least(
+                queue_send_timeout_start,
+                FR_DEMO_BLOCKING_QUEUE_TIMEOUT_TICKS,
+                &g_fr_demo_ipc_timeout_queue_send_elapsed)) {
+            g_fr_demo_ipc_timeout_queue_send_verified = 1u;
+        } else {
+            ++g_fr_demo_ipc_timeout_errors;
+        }
     } else {
         ++g_fr_demo_blocking_queue_errors;
     }
@@ -993,6 +1109,9 @@ static void fr_demo_task_b_entry(void *argument) {
     /*
      * 1. Finite timeout: A is not set.
      */
+    const fr_tick_t event_flags_timeout_start =
+        fr_tick_now();
+
     if (!fr_event_flags_wait(
             &g_fr_demo_event_flags,
             FR_DEMO_EVENT_FLAG_A,
@@ -1001,6 +1120,15 @@ static void fr_demo_task_b_entry(void *argument) {
             FR_DEMO_EVENT_FLAGS_TIMEOUT_TICKS,
             &matched_flags)) {
         ++g_fr_demo_event_flags_timeout_observed;
+
+        if (fr_demo_timeout_elapsed_at_least(
+                event_flags_timeout_start,
+                FR_DEMO_EVENT_FLAGS_TIMEOUT_TICKS,
+                &g_fr_demo_ipc_timeout_event_flags_elapsed)) {
+            g_fr_demo_ipc_timeout_event_flags_verified = 1u;
+        } else {
+            ++g_fr_demo_ipc_timeout_errors;
+        }
 
         if (matched_flags != 0u) {
             ++g_fr_demo_event_flags_data_errors;
@@ -1105,6 +1233,8 @@ static void fr_demo_task_b_entry(void *argument) {
             ++g_fr_demo_event_flags_data_errors;
         }
     }
+
+    fr_demo_run_ipc_timeout_probe();
 
     fr_demo_run_queue_probe();
 
@@ -1458,6 +1588,24 @@ static _Noreturn void fr_bootstrap_entry(void) {
     }
 
     if (g_fr_demo_event_flags_init_failures != 0u) {
+        while (1) {
+        }
+    }
+
+    if (!fr_binary_semaphore_init(
+            &g_fr_demo_ipc_timeout_binary,
+            false)) {
+        ++g_fr_demo_ipc_timeout_init_failures;
+    }
+
+    if (!fr_counting_semaphore_init(
+            &g_fr_demo_ipc_timeout_counting,
+            0u,
+            1u)) {
+        ++g_fr_demo_ipc_timeout_init_failures;
+    }
+
+    if (g_fr_demo_ipc_timeout_init_failures != 0u) {
         while (1) {
         }
     }

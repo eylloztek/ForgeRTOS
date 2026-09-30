@@ -6,6 +6,7 @@
 #include "forge/kernel/scheduler_internal.h"
 #include "forge/kernel/task_internal.h"
 #include "forge/kernel/wait_internal.h"
+#include "forge/kernel/wait_timeout_internal.h"
 #include "forge/queue.h"
 #include "forge/scheduler.h"
 #include "forge/tick.h"
@@ -27,11 +28,6 @@ static bool fr_queue_thread_context_allowed(void) {
            ((primask & 1u) == 0u) &&
            ((faultmask & 1u) == 0u) &&
            (basepri == 0u);
-}
-
-static bool fr_queue_timeout_valid(uint32_t timeout_ticks) {
-    return (timeout_ticks <= FR_WAIT_MAX_FINITE_TICKS) ||
-           (timeout_ticks == FR_WAIT_FOREVER);
 }
 
 static bool fr_queue_state_valid_locked(const fr_queue_t *queue) {
@@ -181,17 +177,17 @@ bool fr_queue_send_wait(fr_queue_t *queue,
                         uint32_t timeout_ticks) {
     if ((queue == NULL) ||
         (item == NULL) ||
-        !fr_queue_thread_context_allowed() ||
-        !fr_queue_timeout_valid(timeout_ticks)) {
+        !fr_queue_thread_context_allowed()) {
         return false;
     }
 
-    const bool wait_forever = (timeout_ticks == FR_QUEUE_WAIT_FOREVER);
+    fr_wait_timeout_t timeout;
 
-    const fr_tick_t deadline =
-        wait_forever
-            ? 0u
-            : (fr_tick_now() + timeout_ticks);
+    if (!fr_wait_timeout_start(
+            &timeout,
+            timeout_ticks)) {
+        return false;
+    }
 
     for (;;) {
         const fr_critical_state_t critical_state =
@@ -213,22 +209,13 @@ bool fr_queue_send_wait(fr_queue_t *queue,
             return true;
         }
 
-        if (timeout_ticks == 0u) {
+        uint32_t wait_ticks;
+
+        if (!fr_wait_timeout_remaining(
+                &timeout,
+                &wait_ticks)) {
             fr_critical_exit(critical_state);
             return false;
-        }
-
-        uint32_t wait_ticks = FR_QUEUE_WAIT_FOREVER;
-
-        if (!wait_forever) {
-            const fr_tick_t now = fr_tick_now();
-
-            if (fr_tick_deadline_reached(now, deadline)) {
-                fr_critical_exit(critical_state);
-                return false;
-            }
-
-            wait_ticks = (uint32_t)(deadline - now);
         }
 
         const bool blocked =
@@ -254,8 +241,8 @@ bool fr_queue_send_wait(fr_queue_t *queue,
         }
 
         /*
-         * Signaled does not reserve the slot. Retry while preserving
-         * the original absolute deadline.
+         * A signal does not reserve a queue slot.
+         * Retry using the original absolute deadline.
          */
     }
 }
@@ -265,17 +252,17 @@ bool fr_queue_receive_wait(fr_queue_t *queue,
                            uint32_t timeout_ticks) {
     if ((queue == NULL) ||
         (item == NULL) ||
-        !fr_queue_thread_context_allowed() ||
-        !fr_queue_timeout_valid(timeout_ticks)) {
+        !fr_queue_thread_context_allowed()) {
         return false;
     }
 
-    const bool wait_forever = (timeout_ticks == FR_QUEUE_WAIT_FOREVER);
+    fr_wait_timeout_t timeout;
 
-    const fr_tick_t deadline =
-        wait_forever
-            ? 0u
-            : (fr_tick_now() + timeout_ticks);
+    if (!fr_wait_timeout_start(
+            &timeout,
+            timeout_ticks)) {
+        return false;
+    }
 
     for (;;) {
         const fr_critical_state_t critical_state =
@@ -297,22 +284,13 @@ bool fr_queue_receive_wait(fr_queue_t *queue,
             return true;
         }
 
-        if (timeout_ticks == 0u) {
+        uint32_t wait_ticks;
+
+        if (!fr_wait_timeout_remaining(
+                &timeout,
+                &wait_ticks)) {
             fr_critical_exit(critical_state);
             return false;
-        }
-
-        uint32_t wait_ticks = FR_QUEUE_WAIT_FOREVER;
-
-        if (!wait_forever) {
-            const fr_tick_t now = fr_tick_now();
-
-            if (fr_tick_deadline_reached(now, deadline)) {
-                fr_critical_exit(critical_state);
-                return false;
-            }
-
-            wait_ticks = (uint32_t)(deadline - now);
         }
 
         const bool blocked =
@@ -338,8 +316,8 @@ bool fr_queue_receive_wait(fr_queue_t *queue,
         }
 
         /*
-         * Signaled does not reserve an item. Retry while preserving
-         * the original absolute deadline.
+         * A signal does not reserve a queued item.
+         * Retry using the original absolute deadline.
          */
     }
 }
