@@ -12,6 +12,7 @@
 #include "forge/mutex.h"
 #include "forge/queue.h"
 #include "forge/task.h"
+#include "forge/task_stack.h"
 #include "forge/tick.h"
 
 #define FR_DEMO_BOOTSTRAP_STACK_WORDS     128u
@@ -75,6 +76,7 @@
 #define FR_DEMO_EVENT_FLAGS_TIMEOUT_TICKS 2u
 
 #define FR_DEMO_IPC_TIMEOUT_TICKS 3u
+#define FR_DEMO_STACK_DIAGNOSTIC_MASK 0x0000000Fu
 
 _Alignas(8) uint32_t g_fr_demo_bootstrap_stack[FR_DEMO_BOOTSTRAP_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_a_stack[FR_DEMO_TASK_A_STACK_WORDS];
@@ -335,6 +337,14 @@ volatile uint32_t g_fr_demo_ipc_timeout_queue_receive_elapsed;
 volatile uint32_t g_fr_demo_ipc_timeout_queue_send_elapsed;
 volatile uint32_t g_fr_demo_ipc_timeout_event_flags_elapsed;
 
+fr_task_stack_info_t g_fr_demo_task_a_stack_diagnostics;
+fr_task_stack_info_t g_fr_demo_task_b_stack_diagnostics;
+fr_task_stack_info_t g_fr_demo_task_c_stack_diagnostics;
+
+volatile uint32_t g_fr_demo_stack_diagnostic_checks;
+volatile uint32_t g_fr_demo_stack_diagnostic_errors;
+volatile uint32_t g_fr_demo_stack_overflow_detected;
+
 _Static_assert((FR_DEMO_BOOTSTRAP_STACK_WORDS % 2u) == 0u, "Bootstrap stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_A_STACK_WORDS % 2u) == 0u, "Task A stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_B_STACK_WORDS % 2u) == 0u, "Task B stack size must preserve 8-byte alignment");
@@ -354,6 +364,110 @@ static uint32_t fr_demo_advance_local_state(uint32_t state) {
     return (state * 1664525u) + 1013904223u;
 }
 
+
+static bool fr_demo_stack_info_is_valid(
+    const fr_task_stack_info_t *info,
+    uint32_t expected_size_words) {
+    if ((info == NULL) ||
+        (info->size_words != expected_size_words) ||
+        (info->guard_words != FR_TASK_STACK_GUARD_WORDS) ||
+        (info->usable_words !=
+         (expected_size_words - FR_TASK_STACK_GUARD_WORDS)) ||
+        (info->minimum_free_words > info->size_words) ||
+        (info->peak_used_words > info->size_words) ||
+        ((info->minimum_free_words + info->peak_used_words) !=
+         info->size_words) ||
+        !info->guard_intact ||
+        !info->saved_sp_in_bounds ||
+        !info->saved_sp_aligned ||
+        info->overflow_detected) {
+        return false;
+    }
+
+    const uint32_t expected_usable_free =
+        (info->minimum_free_words > info->guard_words)
+            ? (info->minimum_free_words - info->guard_words)
+            : 0u;
+
+    return info->minimum_usable_free_words == expected_usable_free;
+}
+
+static bool fr_demo_stack_watermark_monotonic(
+    const fr_task_stack_info_t *previous,
+    const fr_task_stack_info_t *current) {
+    return (current->minimum_free_words <= previous->minimum_free_words) &&
+           (current->peak_used_words >= previous->peak_used_words);
+}
+
+static void fr_demo_copy_stack_info(fr_task_stack_info_t *destination,
+                                    const fr_task_stack_info_t *source) {
+    destination->size_words = source->size_words;
+    destination->guard_words = source->guard_words;
+    destination->usable_words = source->usable_words;
+    destination->minimum_free_words = source->minimum_free_words;
+    destination->minimum_usable_free_words =
+        source->minimum_usable_free_words;
+    destination->peak_used_words = source->peak_used_words;
+
+    destination->stack_base = source->stack_base;
+    destination->stack_top = source->stack_top;
+    destination->saved_sp = source->saved_sp;
+
+    destination->guard_intact = source->guard_intact;
+    destination->saved_sp_in_bounds = source->saved_sp_in_bounds;
+    destination->saved_sp_aligned = source->saved_sp_aligned;
+    destination->overflow_detected = source->overflow_detected;
+}
+
+static void fr_demo_update_stack_diagnostics(void) {
+    fr_task_stack_info_t task_a;
+    fr_task_stack_info_t task_b;
+    fr_task_stack_info_t task_c;
+
+    bool valid =
+        fr_task_stack_get_info(g_fr_demo_task_a, &task_a) &&
+        fr_task_stack_get_info(g_fr_demo_task_b, &task_b) &&
+        fr_task_stack_get_info(g_fr_demo_task_c, &task_c);
+
+    if (valid) {
+        valid =
+            fr_demo_stack_info_is_valid(
+                &task_a, FR_DEMO_TASK_A_STACK_WORDS) &&
+            fr_demo_stack_info_is_valid(
+                &task_b, FR_DEMO_TASK_B_STACK_WORDS) &&
+            fr_demo_stack_info_is_valid(
+                &task_c, FR_DEMO_TASK_C_STACK_WORDS);
+    }
+
+    if (valid && (g_fr_demo_stack_diagnostic_checks != 0u)) {
+        valid =
+            fr_demo_stack_watermark_monotonic(
+                &g_fr_demo_task_a_stack_diagnostics, &task_a) &&
+            fr_demo_stack_watermark_monotonic(
+                &g_fr_demo_task_b_stack_diagnostics, &task_b) &&
+            fr_demo_stack_watermark_monotonic(
+                &g_fr_demo_task_c_stack_diagnostics, &task_c);
+    }
+
+    if (valid) {
+        if (task_a.overflow_detected ||
+            task_b.overflow_detected ||
+            task_c.overflow_detected) {
+            g_fr_demo_stack_overflow_detected = 1u;
+        }
+
+        fr_demo_copy_stack_info(
+            &g_fr_demo_task_a_stack_diagnostics, &task_a);
+        fr_demo_copy_stack_info(
+            &g_fr_demo_task_b_stack_diagnostics, &task_b);
+        fr_demo_copy_stack_info(
+            &g_fr_demo_task_c_stack_diagnostics, &task_c);
+    } else {
+        ++g_fr_demo_stack_diagnostic_errors;
+    }
+
+    ++g_fr_demo_stack_diagnostic_checks;
+}
 
 static bool fr_demo_execution_context_is_valid(fr_task_handle_t expected_task,
                                                 const fr_task_info_t *task_info) {
@@ -453,7 +567,8 @@ static bool fr_demo_timeout_elapsed_at_least(
         return false;
     }
 
-    const uint32_t elapsed = fr_tick_elapsed(start, fr_tick_now());
+    const uint32_t elapsed =
+        fr_tick_elapsed(start, fr_tick_now());
 
     *elapsed_out = elapsed;
 
@@ -1263,6 +1378,8 @@ static void fr_demo_task_b_entry(void *argument) {
         ++g_fr_demo_semaphore_forever_signals;
     }
 
+    fr_demo_update_stack_diagnostics();
+
     while (1) {
 
         fr_demo_queue_message_t message;
@@ -1312,6 +1429,12 @@ static void fr_demo_task_b_entry(void *argument) {
                                             local_state,
                                             &g_fr_demo_task_b_preemption);
         }
+
+        if ((g_fr_demo_task_b_iterations &
+             FR_DEMO_STACK_DIAGNOSTIC_MASK) == 0u) {
+            fr_demo_update_stack_diagnostics();
+        }
+
         const fr_tick_t sleep_start = fr_tick_now();
 
         ++g_fr_demo_task_b_sleep_calls;

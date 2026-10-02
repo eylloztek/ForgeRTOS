@@ -6,12 +6,17 @@
 #include "forge/kernel/port.h"
 #include "forge/kernel/task_internal.h"
 #include "forge/task.h"
+#include "forge/task_stack.h"
 
 static fr_task_t g_fr_task_pool[FR_CONFIG_MAX_TASKS];
 static volatile uint32_t g_fr_task_count;
 
+#define FR_TASK_STACK_FILL_PATTERN 0xA5A5A5A5u
+
 _Static_assert(FR_CONFIG_MAX_TASKS > 0u, "ForgeRTOS must support at least one task");
 _Static_assert(FR_CONFIG_MAX_TASK_PRIORITY <= UINT8_MAX, "Task priority must fit fr_task_priority_t");
+_Static_assert(FR_CONFIG_MIN_TASK_STACK_WORDS > FR_TASK_STACK_GUARD_WORDS,
+               "Minimum task stack must be larger than the stack guard");
 
 static bool fr_task_stack_is_valid(const fr_task_config_t *config) {
     if (config->stack_memory == NULL) {
@@ -52,6 +57,37 @@ static uint32_t *fr_task_calculate_stack_top(const fr_task_config_t *config) {
     const uintptr_t stack_size_bytes = (uintptr_t)config->stack_size_words * sizeof(uint32_t);
 
     return (uint32_t *)(stack_base + stack_size_bytes);
+}
+
+static void fr_task_stack_fill(uint32_t *stack_base,
+                               uint32_t stack_size_words) {
+    for (uint32_t i = 0u; i < stack_size_words; ++i) {
+        stack_base[i] = FR_TASK_STACK_FILL_PATTERN;
+    }
+}
+
+static uint32_t fr_task_stack_minimum_free_words(
+    const volatile uint32_t *stack_base,
+    uint32_t stack_size_words) {
+    uint32_t free_words = 0u;
+
+    while ((free_words < stack_size_words) &&
+           (stack_base[free_words] == FR_TASK_STACK_FILL_PATTERN)) {
+        ++free_words;
+    }
+
+    return free_words;
+}
+
+static bool fr_task_stack_guard_intact(
+    const volatile uint32_t *stack_base) {
+    for (uint32_t i = 0u; i < FR_TASK_STACK_GUARD_WORDS; ++i) {
+        if (stack_base[i] != FR_TASK_STACK_FILL_PATTERN) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 static bool fr_task_handle_is_valid(fr_task_handle_t task) {
@@ -135,7 +171,14 @@ fr_task_status_t fr_task_create(fr_task_handle_t *out_task, const fr_task_config
 
     fr_critical_exit(reserve_state);
 
-    uint32_t *const initial_sp = fr_port_task_stack_init(task->stack_top, task->entry, task->argument);
+    /*
+     * Fill the complete stack before the synthetic initial context is built.
+     * The untouched prefix becomes the historical stack high-water mark.
+     */
+    fr_task_stack_fill(task->stack_base, task->stack_size_words);
+
+    uint32_t *const initial_sp =
+        fr_port_task_stack_init(task->stack_top, task->entry, task->argument);
 
     const fr_critical_state_t publish_state = fr_critical_enter();
 
@@ -155,6 +198,57 @@ fr_task_status_t fr_task_create(fr_task_handle_t *out_task, const fr_task_config
 
 uint32_t fr_task_count(void) {
     return g_fr_task_count;
+}
+
+bool fr_task_stack_get_info(fr_task_handle_t task,
+                            fr_task_stack_info_t *out_info) {
+    if (out_info == NULL) {
+        return false;
+    }
+
+    const fr_critical_state_t critical_state = fr_critical_enter();
+
+    if (!fr_task_handle_is_valid(task)) {
+        fr_critical_exit(critical_state);
+        return false;
+    }
+
+    const uint32_t size_words = task->stack_size_words;
+    const uint32_t minimum_free_words =
+        fr_task_stack_minimum_free_words(task->stack_base, size_words);
+    const bool guard_intact =
+        fr_task_stack_guard_intact(task->stack_base);
+
+    const uintptr_t stack_base = (uintptr_t)task->stack_base;
+    const uintptr_t stack_top = (uintptr_t)task->stack_top;
+    const uintptr_t saved_sp = (uintptr_t)task->saved_sp;
+
+    const bool saved_sp_in_bounds =
+        (saved_sp >= stack_base) && (saved_sp <= stack_top);
+    const bool saved_sp_aligned = (saved_sp & 0x7u) == 0u;
+
+    out_info->size_words = size_words;
+    out_info->guard_words = FR_TASK_STACK_GUARD_WORDS;
+    out_info->usable_words = size_words - FR_TASK_STACK_GUARD_WORDS;
+    out_info->minimum_free_words = minimum_free_words;
+    out_info->minimum_usable_free_words =
+        (minimum_free_words > FR_TASK_STACK_GUARD_WORDS)
+            ? (minimum_free_words - FR_TASK_STACK_GUARD_WORDS)
+            : 0u;
+    out_info->peak_used_words = size_words - minimum_free_words;
+
+    out_info->stack_base = stack_base;
+    out_info->stack_top = stack_top;
+    out_info->saved_sp = saved_sp;
+
+    out_info->guard_intact = guard_intact;
+    out_info->saved_sp_in_bounds = saved_sp_in_bounds;
+    out_info->saved_sp_aligned = saved_sp_aligned;
+    out_info->overflow_detected =
+        !guard_intact || !saved_sp_in_bounds;
+
+    fr_critical_exit(critical_state);
+    return true;
 }
 
 bool fr_task_get_info(fr_task_handle_t task, fr_task_info_t *out_info) {

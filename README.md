@@ -35,7 +35,7 @@ Rather than relying on an existing RTOS or CMSIS-RTOS layer, ForgeRTOS implement
 - ~~Implement blocking queue send and receive operations.~~
 - ~~Add task event flags.~~
 - ~~Add timeout support to kernel synchronization and IPC objects.~~
-- Add task stack watermark and overflow diagnostics.
+- ~~Add task stack watermark and overflow diagnostics.~~
 - Add kernel assertions and runtime invariants.
 - Implement kernel event tracing.
 - Add a UART-based kernel monitor interface.
