@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "forge/assert.h"
 #include "forge/config.h"
 #include "forge/critical.h"
 #include "forge/kernel/port.h"
@@ -180,6 +181,15 @@ fr_task_status_t fr_task_create(fr_task_handle_t *out_task, const fr_task_config
     uint32_t *const initial_sp =
         fr_port_task_stack_init(task->stack_top, task->entry, task->argument);
 
+    const uintptr_t initial_sp_address = (uintptr_t)initial_sp;
+    const uintptr_t stack_base_address = (uintptr_t)task->stack_base;
+    const uintptr_t stack_top_address = (uintptr_t)task->stack_top;
+
+    FR_ASSERT(initial_sp != NULL);
+    FR_ASSERT(initial_sp_address >= stack_base_address);
+    FR_ASSERT(initial_sp_address <= stack_top_address);
+    FR_ASSERT((initial_sp_address & 0x7u) == 0u);
+
     const fr_critical_state_t publish_state = fr_critical_enter();
 
     task->saved_sp = initial_sp;
@@ -190,6 +200,11 @@ fr_task_status_t fr_task_create(fr_task_handle_t *out_task, const fr_task_config
     task->wait_has_deadline = false;
     task->state = FR_TASK_STATE_READY;
     *out_task = task;
+
+    FR_ASSERT(task->saved_sp != NULL);
+    FR_ASSERT(task->state == FR_TASK_STATE_READY);
+    FR_ASSERT(task->wait_reason == FR_WAIT_REASON_NONE);
+    FR_ASSERT(task->wait_object == NULL);
 
     fr_critical_exit(publish_state);
 

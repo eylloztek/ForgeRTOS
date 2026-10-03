@@ -5,8 +5,10 @@
 #include "forge/arch/cortex_m4.h"
 #include "forge/arch/fault.h"
 #include "forge/arch/systick.h"
+#include "forge/assert.h"
 #include "forge/board.h"
 #include "forge/event_flags.h"
+#include "forge/kernel_diagnostics.h"
 #include "forge/scheduler.h"
 #include "forge/semaphore.h"
 #include "forge/mutex.h"
@@ -77,6 +79,7 @@
 
 #define FR_DEMO_IPC_TIMEOUT_TICKS 3u
 #define FR_DEMO_STACK_DIAGNOSTIC_MASK 0x0000000Fu
+#define FR_DEMO_KERNEL_INVARIANT_MASK  0x0000000Fu
 
 _Alignas(8) uint32_t g_fr_demo_bootstrap_stack[FR_DEMO_BOOTSTRAP_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_a_stack[FR_DEMO_TASK_A_STACK_WORDS];
@@ -345,6 +348,11 @@ volatile uint32_t g_fr_demo_stack_diagnostic_checks;
 volatile uint32_t g_fr_demo_stack_diagnostic_errors;
 volatile uint32_t g_fr_demo_stack_overflow_detected;
 
+fr_kernel_invariant_report_t g_fr_demo_kernel_invariant_report;
+volatile uint32_t g_fr_demo_kernel_invariant_checks;
+volatile uint32_t g_fr_demo_kernel_invariant_errors;
+volatile uint32_t g_fr_demo_assert_init_failures;
+
 _Static_assert((FR_DEMO_BOOTSTRAP_STACK_WORDS % 2u) == 0u, "Bootstrap stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_A_STACK_WORDS % 2u) == 0u, "Task A stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_B_STACK_WORDS % 2u) == 0u, "Task B stack size must preserve 8-byte alignment");
@@ -467,6 +475,43 @@ static void fr_demo_update_stack_diagnostics(void) {
     }
 
     ++g_fr_demo_stack_diagnostic_checks;
+}
+
+static void fr_demo_copy_kernel_invariant_report(
+    fr_kernel_invariant_report_t *destination,
+    const fr_kernel_invariant_report_t *source) {
+    destination->task_count = source->task_count;
+    destination->created_tasks = source->created_tasks;
+    destination->ready_tasks = source->ready_tasks;
+    destination->running_tasks = source->running_tasks;
+    destination->blocked_tasks = source->blocked_tasks;
+    destination->suspended_tasks = source->suspended_tasks;
+    destination->current_task_id = source->current_task_id;
+    destination->violation_mask = source->violation_mask;
+    destination->first_bad_task_id = source->first_bad_task_id;
+    destination->scheduler_running = source->scheduler_running;
+}
+
+static void fr_demo_update_kernel_invariants(void) {
+    fr_kernel_invariant_report_t report;
+
+    const bool valid = fr_kernel_check_invariants(&report);
+
+    if (!valid ||
+        !report.scheduler_running ||
+        (report.task_count != g_fr_demo_task_count_snapshot) ||
+        (report.created_tasks != 0u) ||
+        (report.running_tasks != 1u) ||
+        (report.current_task_id != g_fr_demo_task_b_info.id) ||
+        (report.violation_mask != 0u)) {
+        ++g_fr_demo_kernel_invariant_errors;
+    }
+
+    fr_demo_copy_kernel_invariant_report(
+        &g_fr_demo_kernel_invariant_report,
+        &report);
+
+    ++g_fr_demo_kernel_invariant_checks;
 }
 
 static bool fr_demo_execution_context_is_valid(fr_task_handle_t expected_task,
@@ -1379,6 +1424,7 @@ static void fr_demo_task_b_entry(void *argument) {
     }
 
     fr_demo_update_stack_diagnostics();
+    fr_demo_update_kernel_invariants();
 
     while (1) {
 
@@ -1433,6 +1479,11 @@ static void fr_demo_task_b_entry(void *argument) {
         if ((g_fr_demo_task_b_iterations &
              FR_DEMO_STACK_DIAGNOSTIC_MASK) == 0u) {
             fr_demo_update_stack_diagnostics();
+        }
+
+        if ((g_fr_demo_task_b_iterations &
+             FR_DEMO_KERNEL_INVARIANT_MASK) == 0u) {
+            fr_demo_update_kernel_invariants();
         }
 
         const fr_tick_t sleep_start = fr_tick_now();
@@ -1565,6 +1616,13 @@ static bool fr_demo_create_tasks(void) {
 }
 
 static _Noreturn void fr_bootstrap_entry(void) {
+    fr_assert_init();
+
+    if ((g_fr_assert_record.magic != 0u) ||
+        (g_fr_assert_record.count != 0u)) {
+        ++g_fr_demo_assert_init_failures;
+    }
+
     fr_fault_init();
     fr_board_init();
 

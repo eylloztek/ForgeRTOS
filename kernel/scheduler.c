@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "forge/assert.h"
 #include "forge/config.h"
 #include "forge/tick.h"
 #include "forge/kernel/wait_internal.h"
@@ -34,6 +35,24 @@ volatile uint32_t g_fr_scheduler_timeout_count;
 volatile uint32_t g_fr_scheduler_last_timeout_task_id;
 volatile uint32_t g_fr_scheduler_last_timeout_tick;
 volatile uint32_t g_fr_scheduler_last_timeout_deadline;
+
+static bool fr_scheduler_saved_sp_valid(const fr_task_t *task,
+                                        const uint32_t *saved_sp) {
+    if ((task == NULL) ||
+        (task->stack_base == NULL) ||
+        (task->stack_top == NULL) ||
+        (saved_sp == NULL)) {
+        return false;
+    }
+
+    const uintptr_t sp = (uintptr_t)saved_sp;
+    const uintptr_t stack_base = (uintptr_t)task->stack_base;
+    const uintptr_t stack_top = (uintptr_t)task->stack_top;
+
+    return (sp >= stack_base) &&
+           (sp <= stack_top) &&
+           ((sp & 0x7u) == 0u);
+}
 
 static void fr_scheduler_idle_entry(void *argument) {
     (void)argument;
@@ -70,6 +89,8 @@ static void fr_scheduler_initialize_idle(void) {
     idle->saved_sp = fr_port_task_stack_init(idle->stack_top,
                                              idle->entry,
                                              idle->argument);
+
+    FR_ASSERT(fr_scheduler_saved_sp_valid(idle, idle->saved_sp));
 
     idle->wait_deadline = 0u;
     idle->wait_object = NULL;
@@ -180,6 +201,9 @@ fr_scheduler_status_t fr_scheduler_start(void) {
         first_task = &g_fr_scheduler_idle_task;
     }
 
+    FR_ASSERT(first_task != NULL);
+    FR_ASSERT(fr_scheduler_saved_sp_valid(first_task, first_task->saved_sp));
+
     fr_port_scheduler_init();
 
     first_task->state = FR_TASK_STATE_RUNNING;
@@ -286,6 +310,8 @@ uint32_t *fr_scheduler_switch_from_isr(uint32_t *current_saved_sp) {
         return NULL;
     }
 
+    FR_ASSERT(fr_scheduler_saved_sp_valid(current_task, current_saved_sp));
+
     current_task->saved_sp = current_saved_sp;
 
     fr_task_t *const next_task = fr_scheduler_select_next(current_task);
@@ -294,6 +320,8 @@ uint32_t *fr_scheduler_switch_from_isr(uint32_t *current_saved_sp) {
         fr_critical_exit(critical_state);
         return NULL;
     }
+
+    FR_ASSERT(fr_scheduler_saved_sp_valid(next_task, next_task->saved_sp));
 
     if (next_task != current_task) {
         if (current_task->state == FR_TASK_STATE_RUNNING) {
@@ -373,6 +401,11 @@ bool fr_scheduler_block_current_locked(fr_wait_reason_t reason,
     }
 
     current_task->state = FR_TASK_STATE_BLOCKED;
+
+    FR_ASSERT(current_task->wait_reason != FR_WAIT_REASON_NONE);
+    FR_ASSERT(current_task->wait_result == FR_WAIT_RESULT_PENDING);
+    FR_ASSERT(current_task->state == FR_TASK_STATE_BLOCKED);
+
     fr_port_request_context_switch();
 
     return true;
@@ -403,6 +436,13 @@ bool fr_scheduler_unblock_task_locked(fr_task_t *task,
     } else {
         task->state = FR_TASK_STATE_READY;
     }
+
+    FR_ASSERT(task->wait_reason == FR_WAIT_REASON_NONE);
+    FR_ASSERT(task->wait_object == NULL);
+    FR_ASSERT(!task->wait_has_deadline);
+    FR_ASSERT(task->wait_deadline == 0u);
+    FR_ASSERT((task->state == FR_TASK_STATE_RUNNING) ||
+              (task->state == FR_TASK_STATE_READY));
 
     return true;
 }
