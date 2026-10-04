@@ -10,6 +10,7 @@
 #include "forge/kernel/port.h"
 #include "forge/kernel/scheduler_internal.h"
 #include "forge/kernel/task_internal.h"
+#include "forge/kernel/trace_internal.h"
 #include "forge/kernel/mutex_internal.h"
 #include "forge/scheduler.h"
 #include "forge/task.h"
@@ -216,6 +217,11 @@ fr_scheduler_status_t fr_scheduler_start(void) {
     g_fr_scheduler_last_timeout_tick = 0u;
     g_fr_scheduler_last_timeout_deadline = 0u;
 
+    fr_trace_record_locked(FR_TRACE_EVENT_SCHEDULER_START,
+                    first_task->id,
+                    fr_task_internal_count(),
+                    (uint32_t)first_task->priority);
+
     fr_port_start_first_task(critical_state);
 }
 
@@ -331,6 +337,11 @@ uint32_t *fr_scheduler_switch_from_isr(uint32_t *current_saved_sp) {
         next_task->state = FR_TASK_STATE_RUNNING;
         g_fr_scheduler_current_task = next_task;
         ++g_fr_scheduler_context_switch_count;
+
+        fr_trace_record_locked(FR_TRACE_EVENT_CONTEXT_SWITCH,
+                        next_task->id,
+                        current_task->id,
+                        next_task->id);
     }
 
     uint32_t *const next_saved_sp = next_task->saved_sp;
@@ -406,6 +417,11 @@ bool fr_scheduler_block_current_locked(fr_wait_reason_t reason,
     FR_ASSERT(current_task->wait_result == FR_WAIT_RESULT_PENDING);
     FR_ASSERT(current_task->state == FR_TASK_STATE_BLOCKED);
 
+    fr_trace_record_locked(FR_TRACE_EVENT_TASK_BLOCK,
+                    current_task->id,
+                    (uint32_t)reason,
+                    timeout_ticks);
+
     fr_port_request_context_switch();
 
     return true;
@@ -419,6 +435,16 @@ bool fr_scheduler_unblock_task_locked(fr_task_t *task,
         ((result != FR_WAIT_RESULT_TIMEOUT) &&
          (result != FR_WAIT_RESULT_SIGNALED))) {
         return false;
+    }
+
+    const fr_wait_reason_t completed_reason = task->wait_reason;
+    const uint32_t completed_deadline = task->wait_deadline;
+
+    if (result == FR_WAIT_RESULT_TIMEOUT) {
+        fr_trace_record_locked(FR_TRACE_EVENT_TASK_TIMEOUT,
+                        task->id,
+                        (uint32_t)completed_reason,
+                        completed_deadline);
     }
 
     task->wait_result = result;
@@ -443,6 +469,11 @@ bool fr_scheduler_unblock_task_locked(fr_task_t *task,
     FR_ASSERT(task->wait_deadline == 0u);
     FR_ASSERT((task->state == FR_TASK_STATE_RUNNING) ||
               (task->state == FR_TASK_STATE_READY));
+
+    fr_trace_record_locked(FR_TRACE_EVENT_TASK_UNBLOCK,
+                    task->id,
+                    (uint32_t)completed_reason,
+                    (uint32_t)result);
 
     return true;
 }

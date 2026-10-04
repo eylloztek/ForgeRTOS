@@ -20,6 +20,7 @@ add_executable(${TARGET}
     kernel/wait_timeout.c
     kernel/assert.c
     kernel/diagnostics.c
+    kernel/trace.c
     kernel/task.c
     kernel/tick.c
     port/cortex_m4/context_probe.S

@@ -16,6 +16,7 @@
 #include "forge/task.h"
 #include "forge/task_stack.h"
 #include "forge/tick.h"
+#include "forge/trace.h"
 
 #define FR_DEMO_BOOTSTRAP_STACK_WORDS     128u
 #define FR_DEMO_STACK_PATTERN             0xA5A5A5A5u
@@ -80,6 +81,8 @@
 #define FR_DEMO_IPC_TIMEOUT_TICKS 3u
 #define FR_DEMO_STACK_DIAGNOSTIC_MASK 0x0000000Fu
 #define FR_DEMO_KERNEL_INVARIANT_MASK  0x0000000Fu
+#define FR_DEMO_TRACE_DIAGNOSTIC_MASK   0x0000000Fu
+#define FR_DEMO_TRACE_SNAPSHOT_CAPACITY 16u
 
 _Alignas(8) uint32_t g_fr_demo_bootstrap_stack[FR_DEMO_BOOTSTRAP_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_a_stack[FR_DEMO_TASK_A_STACK_WORDS];
@@ -353,6 +356,20 @@ volatile uint32_t g_fr_demo_kernel_invariant_checks;
 volatile uint32_t g_fr_demo_kernel_invariant_errors;
 volatile uint32_t g_fr_demo_assert_init_failures;
 
+fr_trace_entry_t
+    g_fr_demo_trace_snapshot[FR_DEMO_TRACE_SNAPSHOT_CAPACITY];
+fr_trace_status_t g_fr_demo_trace_status;
+
+volatile uint32_t g_fr_demo_trace_init_failures;
+volatile uint32_t g_fr_demo_trace_checks;
+volatile uint32_t g_fr_demo_trace_errors;
+volatile uint32_t g_fr_demo_trace_snapshot_count;
+volatile uint32_t g_fr_demo_trace_last_sequence;
+volatile uint32_t g_fr_demo_trace_context_switch_events;
+volatile uint32_t g_fr_demo_trace_block_events;
+volatile uint32_t g_fr_demo_trace_unblock_events;
+volatile uint32_t g_fr_demo_trace_timeout_events;
+
 _Static_assert((FR_DEMO_BOOTSTRAP_STACK_WORDS % 2u) == 0u, "Bootstrap stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_A_STACK_WORDS % 2u) == 0u, "Task A stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_B_STACK_WORDS % 2u) == 0u, "Task B stack size must preserve 8-byte alignment");
@@ -512,6 +529,90 @@ static void fr_demo_update_kernel_invariants(void) {
         &report);
 
     ++g_fr_demo_kernel_invariant_checks;
+}
+
+static bool fr_demo_trace_event_is_valid(fr_trace_event_t event) {
+    return (event >= FR_TRACE_EVENT_TASK_CREATE) &&
+           (event <= FR_TRACE_EVENT_CONTEXT_SWITCH);
+}
+
+static void fr_demo_update_trace_snapshot(void) {
+    bool valid = fr_trace_get_status(&g_fr_demo_trace_status);
+
+    if (valid) {
+        valid =
+            g_fr_demo_trace_status.enabled &&
+            (g_fr_demo_trace_status.capacity == FR_TRACE_BUFFER_CAPACITY) &&
+            (g_fr_demo_trace_status.count <= FR_TRACE_BUFFER_CAPACITY) &&
+            (g_fr_demo_trace_status.write_index < FR_TRACE_BUFFER_CAPACITY) &&
+            (g_fr_demo_trace_status.next_sequence != 0u);
+    }
+
+    const uint32_t snapshot_count =
+        fr_trace_snapshot(g_fr_demo_trace_snapshot,
+                          FR_DEMO_TRACE_SNAPSHOT_CAPACITY);
+
+    g_fr_demo_trace_snapshot_count = snapshot_count;
+
+    uint32_t context_switch_events = 0u;
+    uint32_t block_events = 0u;
+    uint32_t unblock_events = 0u;
+    uint32_t timeout_events = 0u;
+    uint32_t previous_sequence = 0u;
+
+    if ((snapshot_count == 0u) ||
+        (snapshot_count > FR_DEMO_TRACE_SNAPSHOT_CAPACITY)) {
+        valid = false;
+    }
+
+    for (uint32_t i = 0u; i < snapshot_count; ++i) {
+        const fr_trace_entry_t *const entry =
+            &g_fr_demo_trace_snapshot[i];
+
+        if (!fr_demo_trace_event_is_valid(entry->event) ||
+            ((i != 0u) &&
+             (entry->sequence <= previous_sequence))) {
+            valid = false;
+        }
+
+        previous_sequence = entry->sequence;
+
+        switch (entry->event) {
+            case FR_TRACE_EVENT_TASK_BLOCK:
+                ++block_events;
+                break;
+
+            case FR_TRACE_EVENT_TASK_TIMEOUT:
+                ++timeout_events;
+                break;
+
+            case FR_TRACE_EVENT_TASK_UNBLOCK:
+                ++unblock_events;
+                break;
+
+            case FR_TRACE_EVENT_CONTEXT_SWITCH:
+                ++context_switch_events;
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    g_fr_demo_trace_context_switch_events = context_switch_events;
+    g_fr_demo_trace_block_events = block_events;
+    g_fr_demo_trace_unblock_events = unblock_events;
+    g_fr_demo_trace_timeout_events = timeout_events;
+    g_fr_demo_trace_last_sequence =
+        (snapshot_count != 0u)
+            ? g_fr_demo_trace_snapshot[snapshot_count - 1u].sequence
+            : 0u;
+
+    if (!valid) {
+        ++g_fr_demo_trace_errors;
+    }
+
+    ++g_fr_demo_trace_checks;
 }
 
 static bool fr_demo_execution_context_is_valid(fr_task_handle_t expected_task,
@@ -1425,6 +1526,7 @@ static void fr_demo_task_b_entry(void *argument) {
 
     fr_demo_update_stack_diagnostics();
     fr_demo_update_kernel_invariants();
+    fr_demo_update_trace_snapshot();
 
     while (1) {
 
@@ -1484,6 +1586,11 @@ static void fr_demo_task_b_entry(void *argument) {
         if ((g_fr_demo_task_b_iterations &
              FR_DEMO_KERNEL_INVARIANT_MASK) == 0u) {
             fr_demo_update_kernel_invariants();
+        }
+
+        if ((g_fr_demo_task_b_iterations &
+             FR_DEMO_TRACE_DIAGNOSTIC_MASK) == 0u) {
+            fr_demo_update_trace_snapshot();
         }
 
         const fr_tick_t sleep_start = fr_tick_now();
@@ -1629,6 +1736,23 @@ static _Noreturn void fr_bootstrap_entry(void) {
     g_fr_demo_timeout_math_failures = fr_demo_test_timeout_math();
 
     if (!fr_systick_init(FR_BOARD_RESET_CORE_CLOCK_HZ, FR_DEMO_TICK_HZ)) {
+        while (1) {
+        }
+    }
+
+    fr_trace_init();
+
+    if (!fr_trace_get_status(&g_fr_demo_trace_status) ||
+        !g_fr_demo_trace_status.enabled ||
+        (g_fr_demo_trace_status.capacity != FR_TRACE_BUFFER_CAPACITY) ||
+        (g_fr_demo_trace_status.count != 0u) ||
+        (g_fr_demo_trace_status.write_index != 0u) ||
+        (g_fr_demo_trace_status.next_sequence != 1u) ||
+        (g_fr_demo_trace_status.overwritten_events != 0u)) {
+        ++g_fr_demo_trace_init_failures;
+    }
+
+    if (g_fr_demo_trace_init_failures != 0u) {
         while (1) {
         }
     }

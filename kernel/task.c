@@ -6,6 +6,7 @@
 #include "forge/critical.h"
 #include "forge/kernel/port.h"
 #include "forge/kernel/task_internal.h"
+#include "forge/kernel/trace_internal.h"
 #include "forge/task.h"
 #include "forge/task_stack.h"
 
@@ -205,6 +206,11 @@ fr_task_status_t fr_task_create(fr_task_handle_t *out_task, const fr_task_config
     FR_ASSERT(task->state == FR_TASK_STATE_READY);
     FR_ASSERT(task->wait_reason == FR_WAIT_REASON_NONE);
     FR_ASSERT(task->wait_object == NULL);
+
+    fr_trace_record_locked(FR_TRACE_EVENT_TASK_CREATE,
+                    task->id,
+                    (uint32_t)task->base_priority,
+                    task->stack_size_words);
 
     fr_critical_exit(publish_state);
 
