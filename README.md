@@ -38,6 +38,6 @@ Rather than relying on an existing RTOS or CMSIS-RTOS layer, ForgeRTOS implement
 - ~~Add task stack watermark and overflow diagnostics.~~
 - ~~Add kernel assertions and runtime invariants.~~
 - ~~Implement kernel event tracing.~~
-- Add a UART-based kernel monitor interface.
+- ~~Add a UART-based kernel monitor interface.~~
 - Add RTOS stress tests covering tasks, semaphores, mutexes, queues, and timing.
 - Prepare the final demo, benchmarks, architecture documentation, and the first ForgeRTOS release.

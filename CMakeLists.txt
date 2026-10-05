@@ -32,6 +32,7 @@ add_executable(${TARGET}
     port/cortex_m4/task_context.c
     port/cortex_m4/portasm.S
     bsp/stm32f446re/board.c
+    bsp/stm32f446re/uart.c
     src/main.c
 )
 

@@ -17,6 +17,7 @@
 #include "forge/task_stack.h"
 #include "forge/tick.h"
 #include "forge/trace.h"
+#include "forge/uart.h"
 
 #define FR_DEMO_BOOTSTRAP_STACK_WORDS     128u
 #define FR_DEMO_STACK_PATTERN             0xA5A5A5A5u
@@ -84,10 +85,18 @@
 #define FR_DEMO_TRACE_DIAGNOSTIC_MASK   0x0000000Fu
 #define FR_DEMO_TRACE_SNAPSHOT_CAPACITY 16u
 
+#define FR_DEMO_UART_BAUD_RATE             115200u
+#define FR_DEMO_MONITOR_TASK_STACK_WORDS   128u
+#define FR_DEMO_MONITOR_TASK_PRIORITY      1u
+#define FR_DEMO_MONITOR_POLL_TICKS         50u
+#define FR_DEMO_MONITOR_TRACE_CAPACITY     8u
+#define FR_DEMO_UART_LINE_CAPACITY         128u
+
 _Alignas(8) uint32_t g_fr_demo_bootstrap_stack[FR_DEMO_BOOTSTRAP_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_a_stack[FR_DEMO_TASK_A_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_b_stack[FR_DEMO_TASK_B_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_c_stack[FR_DEMO_TASK_C_STACK_WORDS];
+_Alignas(8) uint32_t g_fr_demo_monitor_task_stack[FR_DEMO_MONITOR_TASK_STACK_WORDS];
 
 uint32_t g_fr_demo_task_a_argument = 0xA1A1A1A1u;
 uint32_t g_fr_demo_task_b_argument = 0xB2B2B2B2u;
@@ -131,6 +140,10 @@ fr_task_status_t g_fr_demo_task_b_status;
 fr_task_handle_t g_fr_demo_task_c;
 fr_task_status_t g_fr_demo_task_c_status;
 
+fr_task_handle_t g_fr_demo_monitor_task;
+fr_task_info_t g_fr_demo_monitor_task_info;
+fr_task_status_t g_fr_demo_monitor_task_status;
+
 volatile uint32_t g_fr_demo_task_a_started;
 volatile uint32_t g_fr_demo_task_b_started;
 
@@ -146,6 +159,7 @@ volatile fr_demo_preemption_stats_t g_fr_demo_task_b_preemption;
 volatile uint32_t g_fr_demo_task_a_entry_count;
 volatile uint32_t g_fr_demo_task_b_entry_count;
 volatile uint32_t g_fr_demo_task_c_entry_count;
+volatile uint32_t g_fr_demo_monitor_task_entry_count;
 
 volatile uint32_t g_fr_demo_task_a_sleep_calls;
 volatile uint32_t g_fr_demo_task_a_wakeups;
@@ -346,6 +360,7 @@ volatile uint32_t g_fr_demo_ipc_timeout_event_flags_elapsed;
 fr_task_stack_info_t g_fr_demo_task_a_stack_diagnostics;
 fr_task_stack_info_t g_fr_demo_task_b_stack_diagnostics;
 fr_task_stack_info_t g_fr_demo_task_c_stack_diagnostics;
+fr_task_stack_info_t g_fr_demo_monitor_stack_diagnostics;
 
 volatile uint32_t g_fr_demo_stack_diagnostic_checks;
 volatile uint32_t g_fr_demo_stack_diagnostic_errors;
@@ -370,11 +385,31 @@ volatile uint32_t g_fr_demo_trace_block_events;
 volatile uint32_t g_fr_demo_trace_unblock_events;
 volatile uint32_t g_fr_demo_trace_timeout_events;
 
+fr_uart_status_t g_fr_demo_uart_status;
+fr_trace_entry_t
+    g_fr_demo_monitor_trace[FR_DEMO_MONITOR_TRACE_CAPACITY];
+static char g_fr_demo_uart_line[FR_DEMO_UART_LINE_CAPACITY];
+
+volatile uint32_t g_fr_demo_uart_init_failures;
+volatile uint32_t g_fr_demo_uart_errors;
+volatile uint32_t g_fr_demo_uart_status_checks;
+volatile uint32_t g_fr_demo_uart_commands;
+volatile uint32_t g_fr_demo_uart_unknown_commands;
+volatile uint32_t g_fr_demo_uart_help_reports;
+volatile uint32_t g_fr_demo_uart_status_reports;
+volatile uint32_t g_fr_demo_uart_trace_dumps;
+volatile uint32_t g_fr_demo_uart_trace_clears;
+volatile uint32_t g_fr_demo_uart_last_command;
+volatile uint32_t g_fr_demo_uart_last_trace_count;
+volatile uint32_t g_fr_demo_uart_last_trace_sequence;
+
 _Static_assert((FR_DEMO_BOOTSTRAP_STACK_WORDS % 2u) == 0u, "Bootstrap stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_A_STACK_WORDS % 2u) == 0u, "Task A stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_B_STACK_WORDS % 2u) == 0u, "Task B stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_C_STACK_WORDS % 2u) == 0u, "Task C stack size must preserve 8-byte alignment");
+_Static_assert((FR_DEMO_MONITOR_TASK_STACK_WORDS % 2u) == 0u, "Monitor task stack size must preserve 8-byte alignment");
 _Static_assert((FR_BOARD_RESET_CORE_CLOCK_HZ % FR_DEMO_TICK_HZ) == 0u, "SysTick frequency must divide core clock exactly");
+_Static_assert(FR_DEMO_MONITOR_TASK_PRIORITY < FR_DEMO_TASK_A_PRIORITY, "Monitor task must have lower priority than Task A");
 _Static_assert(FR_DEMO_TASK_A_PRIORITY < FR_DEMO_TASK_C_PRIORITY, "Task A must have lower priority than Task C");
 _Static_assert(FR_DEMO_TASK_C_PRIORITY < FR_DEMO_TASK_B_PRIORITY, "Task C must have lower priority than Task B");
 
@@ -448,11 +483,13 @@ static void fr_demo_update_stack_diagnostics(void) {
     fr_task_stack_info_t task_a;
     fr_task_stack_info_t task_b;
     fr_task_stack_info_t task_c;
+    fr_task_stack_info_t monitor;
 
     bool valid =
         fr_task_stack_get_info(g_fr_demo_task_a, &task_a) &&
         fr_task_stack_get_info(g_fr_demo_task_b, &task_b) &&
-        fr_task_stack_get_info(g_fr_demo_task_c, &task_c);
+        fr_task_stack_get_info(g_fr_demo_task_c, &task_c) &&
+        fr_task_stack_get_info(g_fr_demo_monitor_task, &monitor);
 
     if (valid) {
         valid =
@@ -461,7 +498,9 @@ static void fr_demo_update_stack_diagnostics(void) {
             fr_demo_stack_info_is_valid(
                 &task_b, FR_DEMO_TASK_B_STACK_WORDS) &&
             fr_demo_stack_info_is_valid(
-                &task_c, FR_DEMO_TASK_C_STACK_WORDS);
+                &task_c, FR_DEMO_TASK_C_STACK_WORDS) &&
+            fr_demo_stack_info_is_valid(
+                &monitor, FR_DEMO_MONITOR_TASK_STACK_WORDS);
     }
 
     if (valid && (g_fr_demo_stack_diagnostic_checks != 0u)) {
@@ -471,13 +510,16 @@ static void fr_demo_update_stack_diagnostics(void) {
             fr_demo_stack_watermark_monotonic(
                 &g_fr_demo_task_b_stack_diagnostics, &task_b) &&
             fr_demo_stack_watermark_monotonic(
-                &g_fr_demo_task_c_stack_diagnostics, &task_c);
+                &g_fr_demo_task_c_stack_diagnostics, &task_c) &&
+            fr_demo_stack_watermark_monotonic(
+                &g_fr_demo_monitor_stack_diagnostics, &monitor);
     }
 
     if (valid) {
         if (task_a.overflow_detected ||
             task_b.overflow_detected ||
-            task_c.overflow_detected) {
+            task_c.overflow_detected ||
+            monitor.overflow_detected) {
             g_fr_demo_stack_overflow_detected = 1u;
         }
 
@@ -487,6 +529,8 @@ static void fr_demo_update_stack_diagnostics(void) {
             &g_fr_demo_task_b_stack_diagnostics, &task_b);
         fr_demo_copy_stack_info(
             &g_fr_demo_task_c_stack_diagnostics, &task_c);
+        fr_demo_copy_stack_info(
+            &g_fr_demo_monitor_stack_diagnostics, &monitor);
     } else {
         ++g_fr_demo_stack_diagnostic_errors;
     }
@@ -613,6 +657,254 @@ static void fr_demo_update_trace_snapshot(void) {
     }
 
     ++g_fr_demo_trace_checks;
+}
+
+static uint32_t fr_demo_text_length(const char *text) {
+    if (text == NULL) {
+        return 0u;
+    }
+
+    uint32_t length = 0u;
+
+    while (text[length] != '\0') {
+        ++length;
+    }
+
+    return length;
+}
+
+static bool fr_demo_uart_write_text(const char *text) {
+    const uint32_t length = fr_demo_text_length(text);
+
+    if ((length == 0u) ||
+        !fr_uart_write((const uint8_t *)text, length)) {
+        ++g_fr_demo_uart_errors;
+        return false;
+    }
+
+    return true;
+}
+
+static bool fr_demo_line_append_char(uint32_t *length, char value) {
+    if ((length == NULL) ||
+        (*length >= FR_DEMO_UART_LINE_CAPACITY)) {
+        return false;
+    }
+
+    g_fr_demo_uart_line[*length] = value;
+    ++(*length);
+    return true;
+}
+
+static bool fr_demo_line_append_text(uint32_t *length,
+                                     const char *text) {
+    if ((length == NULL) || (text == NULL)) {
+        return false;
+    }
+
+    for (uint32_t i = 0u; text[i] != '\0'; ++i) {
+        if (!fr_demo_line_append_char(length, text[i])) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool fr_demo_line_append_u32(uint32_t *length,
+                                    uint32_t value) {
+    char digits[10];
+    uint32_t digit_count = 0u;
+
+    do {
+        digits[digit_count] = (char)('0' + (value % 10u));
+        ++digit_count;
+        value /= 10u;
+    } while ((value != 0u) && (digit_count < 10u));
+
+    while (digit_count != 0u) {
+        --digit_count;
+
+        if (!fr_demo_line_append_char(length,
+                                      digits[digit_count])) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static const char *fr_demo_trace_event_name(fr_trace_event_t event) {
+    switch (event) {
+        case FR_TRACE_EVENT_TASK_CREATE:
+            return "CREATE";
+
+        case FR_TRACE_EVENT_SCHEDULER_START:
+            return "START";
+
+        case FR_TRACE_EVENT_TASK_BLOCK:
+            return "BLOCK";
+
+        case FR_TRACE_EVENT_TASK_TIMEOUT:
+            return "TIMEOUT";
+
+        case FR_TRACE_EVENT_TASK_UNBLOCK:
+            return "UNBLOCK";
+
+        case FR_TRACE_EVENT_CONTEXT_SWITCH:
+            return "SWITCH";
+
+        default:
+            return "UNKNOWN";
+    }
+}
+
+static bool fr_demo_uart_emit_trace_entry(
+    const fr_trace_entry_t *entry) {
+    if (entry == NULL) {
+        return false;
+    }
+
+    uint32_t length = 0u;
+
+    const bool built =
+        fr_demo_line_append_char(&length, '#') &&
+        fr_demo_line_append_u32(&length, entry->sequence) &&
+        fr_demo_line_append_text(&length, " t=") &&
+        fr_demo_line_append_u32(&length, entry->tick) &&
+        fr_demo_line_append_char(&length, ' ') &&
+        fr_demo_line_append_text(
+            &length,
+            fr_demo_trace_event_name(entry->event)) &&
+        fr_demo_line_append_text(&length, " task=") &&
+        fr_demo_line_append_u32(&length, entry->task_id) &&
+        fr_demo_line_append_text(&length, " a0=") &&
+        fr_demo_line_append_u32(&length, entry->arg0) &&
+        fr_demo_line_append_text(&length, " a1=") &&
+        fr_demo_line_append_u32(&length, entry->arg1) &&
+        fr_demo_line_append_text(&length, "\r\n");
+
+    if (!built ||
+        !fr_uart_write((const uint8_t *)g_fr_demo_uart_line,
+                       length)) {
+        ++g_fr_demo_uart_errors;
+        return false;
+    }
+
+    return true;
+}
+
+static void fr_demo_uart_emit_help(void) {
+    if (fr_demo_uart_write_text(
+            "Commands: h/? help, s status, t trace, c clear-trace\r\n")) {
+        ++g_fr_demo_uart_help_reports;
+    }
+}
+
+static void fr_demo_uart_emit_status(void) {
+    fr_trace_status_t trace_status;
+
+    if (!fr_uart_get_status(&g_fr_demo_uart_status) ||
+        !fr_trace_get_status(&trace_status)) {
+        ++g_fr_demo_uart_errors;
+        return;
+    }
+
+    uint32_t length = 0u;
+
+    const bool built =
+        fr_demo_line_append_text(&length, "STATUS tick=") &&
+        fr_demo_line_append_u32(&length, fr_tick_now()) &&
+        fr_demo_line_append_text(&length, " tasks=") &&
+        fr_demo_line_append_u32(&length, fr_task_count()) &&
+        fr_demo_line_append_text(&length, " trace=") &&
+        fr_demo_line_append_u32(&length, trace_status.count) &&
+        fr_demo_line_append_char(&length, '/') &&
+        fr_demo_line_append_u32(&length, trace_status.capacity) &&
+        fr_demo_line_append_text(&length, " ovw=") &&
+        fr_demo_line_append_u32(&length,
+                                trace_status.overwritten_events) &&
+        fr_demo_line_append_text(&length, " tx=") &&
+        fr_demo_line_append_u32(&length,
+                                g_fr_demo_uart_status.tx_bytes) &&
+        fr_demo_line_append_text(&length, " rx=") &&
+        fr_demo_line_append_u32(&length,
+                                g_fr_demo_uart_status.rx_bytes) &&
+        fr_demo_line_append_text(&length, " err=") &&
+        fr_demo_line_append_u32(&length,
+                                g_fr_demo_uart_status.rx_error_count) &&
+        fr_demo_line_append_text(&length, "\r\n");
+
+    if (!built ||
+        !fr_uart_write((const uint8_t *)g_fr_demo_uart_line,
+                       length)) {
+        ++g_fr_demo_uart_errors;
+        return;
+    }
+
+    ++g_fr_demo_uart_status_reports;
+}
+
+static void fr_demo_uart_dump_trace(void) {
+    const uint32_t count =
+        fr_trace_snapshot(g_fr_demo_monitor_trace,
+                          FR_DEMO_MONITOR_TRACE_CAPACITY);
+
+    g_fr_demo_uart_last_trace_count = count;
+
+    if (!fr_demo_uart_write_text("TRACE newest events:\r\n")) {
+        return;
+    }
+
+    for (uint32_t i = 0u; i < count; ++i) {
+        if (!fr_demo_uart_emit_trace_entry(
+                &g_fr_demo_monitor_trace[i])) {
+            return;
+        }
+    }
+
+    g_fr_demo_uart_last_trace_sequence =
+        (count != 0u)
+            ? g_fr_demo_monitor_trace[count - 1u].sequence
+            : 0u;
+
+    ++g_fr_demo_uart_trace_dumps;
+}
+
+static void fr_demo_uart_process_command(uint8_t command) {
+    if ((command == '\r') || (command == '\n')) {
+        return;
+    }
+
+    g_fr_demo_uart_last_command = command;
+    ++g_fr_demo_uart_commands;
+
+    switch (command) {
+        case 'h':
+        case '?':
+            fr_demo_uart_emit_help();
+            break;
+
+        case 's':
+            fr_demo_uart_emit_status();
+            break;
+
+        case 't':
+            fr_demo_uart_dump_trace();
+            break;
+
+        case 'c':
+            fr_trace_clear();
+            ++g_fr_demo_uart_trace_clears;
+            (void)fr_demo_uart_write_text("OK trace cleared\r\n");
+            break;
+
+        default:
+            ++g_fr_demo_uart_unknown_commands;
+            (void)fr_demo_uart_write_text(
+                "ERR unknown command; use h\r\n");
+            break;
+    }
 }
 
 static bool fr_demo_execution_context_is_valid(fr_task_handle_t expected_task,
@@ -1612,6 +1904,35 @@ static void fr_demo_task_b_entry(void *argument) {
     }
 }
 
+static void fr_demo_monitor_task_entry(void *argument) {
+    (void)argument;
+
+    ++g_fr_demo_monitor_task_entry_count;
+
+    (void)fr_demo_uart_write_text(
+        "\r\nForgeRTOS UART monitor ready @ 115200 8-N-1\r\n");
+
+    fr_demo_uart_emit_help();
+
+    while (1) {
+        uint8_t command;
+
+        while (fr_uart_try_read(&command)) {
+            fr_demo_uart_process_command(command);
+        }
+
+        if (fr_uart_get_status(&g_fr_demo_uart_status)) {
+            ++g_fr_demo_uart_status_checks;
+        } else {
+            ++g_fr_demo_uart_errors;
+        }
+
+        if (!fr_task_sleep(FR_DEMO_MONITOR_POLL_TICKS)) {
+            ++g_fr_demo_uart_errors;
+        }
+    }
+}
+
 static void fr_demo_task_c_entry(void *argument) {
     (void)argument;
 
@@ -1699,13 +2020,24 @@ static bool fr_demo_create_tasks(void) {
         .priority = FR_DEMO_TASK_C_PRIORITY
     };
 
+    const fr_task_config_t monitor_task_config = {
+        .entry = fr_demo_monitor_task_entry,
+        .argument = NULL,
+        .stack_memory = g_fr_demo_monitor_task_stack,
+        .stack_size_words = FR_DEMO_MONITOR_TASK_STACK_WORDS,
+        .priority = FR_DEMO_MONITOR_TASK_PRIORITY
+    };
+
     g_fr_demo_task_a_status = fr_task_create(&g_fr_demo_task_a, &task_a_config);
     g_fr_demo_task_b_status = fr_task_create(&g_fr_demo_task_b, &task_b_config);
     g_fr_demo_task_c_status = fr_task_create(&g_fr_demo_task_c, &task_c_config);
+    g_fr_demo_monitor_task_status =
+        fr_task_create(&g_fr_demo_monitor_task, &monitor_task_config);
 
     if ((g_fr_demo_task_a_status != FR_TASK_OK) ||
         (g_fr_demo_task_b_status != FR_TASK_OK) ||
-        (g_fr_demo_task_c_status != FR_TASK_OK)) {
+        (g_fr_demo_task_c_status != FR_TASK_OK) ||
+        (g_fr_demo_monitor_task_status != FR_TASK_OK)) {
         return false;
     }
 
@@ -1714,6 +2046,11 @@ static bool fr_demo_create_tasks(void) {
     }
 
     if (!fr_task_get_info(g_fr_demo_task_b, &g_fr_demo_task_b_info)) {
+        return false;
+    }
+
+    if (!fr_task_get_info(g_fr_demo_monitor_task,
+                          &g_fr_demo_monitor_task_info)) {
         return false;
     }
 
@@ -1732,6 +2069,26 @@ static _Noreturn void fr_bootstrap_entry(void) {
 
     fr_fault_init();
     fr_board_init();
+
+    if (!fr_uart_init(FR_BOARD_RESET_CORE_CLOCK_HZ,
+                      FR_DEMO_UART_BAUD_RATE)) {
+        ++g_fr_demo_uart_init_failures;
+    }
+
+    if (!fr_uart_get_status(&g_fr_demo_uart_status) ||
+        !g_fr_demo_uart_status.initialized ||
+        (g_fr_demo_uart_status.peripheral_clock_hz !=
+         FR_BOARD_RESET_CORE_CLOCK_HZ) ||
+        (g_fr_demo_uart_status.baud_rate !=
+         FR_DEMO_UART_BAUD_RATE) ||
+        (g_fr_demo_uart_status.baud_divisor == 0u)) {
+        ++g_fr_demo_uart_init_failures;
+    }
+
+    if (g_fr_demo_uart_init_failures != 0u) {
+        while (1) {
+        }
+    }
 
     g_fr_demo_timeout_math_failures = fr_demo_test_timeout_math();
 
