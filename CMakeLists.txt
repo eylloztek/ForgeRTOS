@@ -34,6 +34,8 @@ add_executable(${TARGET}
     bsp/stm32f446re/board.c
     bsp/stm32f446re/uart.c
     src/main.c
+    src/stress.c
+    src/stress.c
 )
 
 target_include_directories(${TARGET} PRIVATE

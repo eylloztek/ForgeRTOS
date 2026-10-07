@@ -18,6 +18,7 @@
 #include "forge/tick.h"
 #include "forge/trace.h"
 #include "forge/uart.h"
+#include "stress.h"
 
 #define FR_DEMO_BOOTSTRAP_STACK_WORDS     128u
 #define FR_DEMO_STACK_PATTERN             0xA5A5A5A5u
@@ -90,7 +91,7 @@
 #define FR_DEMO_MONITOR_TASK_PRIORITY      1u
 #define FR_DEMO_MONITOR_POLL_TICKS         50u
 #define FR_DEMO_MONITOR_TRACE_CAPACITY     8u
-#define FR_DEMO_UART_LINE_CAPACITY         128u
+#define FR_DEMO_UART_LINE_CAPACITY         192u
 
 _Alignas(8) uint32_t g_fr_demo_bootstrap_stack[FR_DEMO_BOOTSTRAP_STACK_WORDS];
 _Alignas(8) uint32_t g_fr_demo_task_a_stack[FR_DEMO_TASK_A_STACK_WORDS];
@@ -402,6 +403,7 @@ volatile uint32_t g_fr_demo_uart_trace_clears;
 volatile uint32_t g_fr_demo_uart_last_command;
 volatile uint32_t g_fr_demo_uart_last_trace_count;
 volatile uint32_t g_fr_demo_uart_last_trace_sequence;
+volatile uint32_t g_fr_demo_stress_integration_errors;
 
 _Static_assert((FR_DEMO_BOOTSTRAP_STACK_WORDS % 2u) == 0u, "Bootstrap stack size must preserve 8-byte alignment");
 _Static_assert((FR_DEMO_TASK_A_STACK_WORDS % 2u) == 0u, "Task A stack size must preserve 8-byte alignment");
@@ -796,7 +798,7 @@ static bool fr_demo_uart_emit_trace_entry(
 
 static void fr_demo_uart_emit_help(void) {
     if (fr_demo_uart_write_text(
-            "Commands: h/? help, s status, t trace, c clear-trace\r\n")) {
+            "Commands: h/? help, s status, t trace, x stress, c clear-trace\r\n")) {
         ++g_fr_demo_uart_help_reports;
     }
 }
@@ -845,6 +847,76 @@ static void fr_demo_uart_emit_status(void) {
     ++g_fr_demo_uart_status_reports;
 }
 
+static void fr_demo_uart_emit_stress_status(void) {
+    fr_demo_stress_status_t stress;
+
+    if (!fr_demo_stress_get_status(&stress)) {
+        ++g_fr_demo_uart_errors;
+        return;
+    }
+
+    uint32_t length = 0u;
+
+    const bool first_line =
+        fr_demo_line_append_text(&length, "STRESS run=") &&
+        fr_demo_line_append_u32(&length, stress.started ? 1u : 0u) &&
+        fr_demo_line_append_text(&length, " sent=") &&
+        fr_demo_line_append_u32(&length, stress.messages_sent) &&
+        fr_demo_line_append_text(&length, " recv=") &&
+        fr_demo_line_append_u32(&length, stress.messages_received) &&
+        fr_demo_line_append_text(&length, " q=") &&
+        fr_demo_line_append_u32(&length, stress.queue_depth) &&
+        fr_demo_line_append_char(&length, '/') &&
+        fr_demo_line_append_u32(&length, stress.queue_capacity) &&
+        fr_demo_line_append_text(&length, " sync=") &&
+        fr_demo_line_append_u32(&length, stress.sync_completions) &&
+        fr_demo_line_append_char(&length, '/') &&
+        fr_demo_line_append_u32(&length, stress.sync_requests) &&
+        fr_demo_line_append_text(&length, " mutex=") &&
+        fr_demo_line_append_u32(&length, stress.mutex_acquisitions) &&
+        fr_demo_line_append_text(&length, " ack=") &&
+        fr_demo_line_append_u32(&length, stress.ack_successes) &&
+        fr_demo_line_append_text(&length, " err=") &&
+        fr_demo_line_append_u32(&length, stress.errors) &&
+        fr_demo_line_append_text(&length, "\r\n");
+
+    if (!first_line ||
+        !fr_uart_write((const uint8_t *)g_fr_demo_uart_line, length)) {
+        ++g_fr_demo_uart_errors;
+        return;
+    }
+
+    length = 0u;
+
+    const bool second_line =
+        fr_demo_line_append_text(&length, "STRESSCHK order=") &&
+        fr_demo_line_append_u32(&length, stress.order_errors) &&
+        fr_demo_line_append_text(&length, " crc=") &&
+        fr_demo_line_append_u32(&length, stress.checksum_errors) &&
+        fr_demo_line_append_text(&length, " laterr=") &&
+        fr_demo_line_append_u32(&length, stress.latency_errors) &&
+        fr_demo_line_append_text(&length, " latmax=") &&
+        fr_demo_line_append_u32(&length, stress.max_latency_ticks) &&
+        fr_demo_line_append_text(&length, " qtx=") &&
+        fr_demo_line_append_u32(&length, stress.queue_send_timeouts) &&
+        fr_demo_line_append_text(&length, " qrx=") &&
+        fr_demo_line_append_u32(&length, stress.queue_receive_timeouts) &&
+        fr_demo_line_append_text(&length, " ackto=") &&
+        fr_demo_line_append_u32(&length, stress.ack_timeouts) &&
+        fr_demo_line_append_text(&length, " pi=") &&
+        fr_demo_line_append_u32(&length, stress.priority_errors) &&
+        fr_demo_line_append_text(&length, " timing=") &&
+        fr_demo_line_append_u32(&length, stress.timing_errors) &&
+        fr_demo_line_append_text(&length, " stack=") &&
+        fr_demo_line_append_u32(&length, stress.stack_errors) &&
+        fr_demo_line_append_text(&length, "\r\n");
+
+    if (!second_line ||
+        !fr_uart_write((const uint8_t *)g_fr_demo_uart_line, length)) {
+        ++g_fr_demo_uart_errors;
+    }
+}
+
 static void fr_demo_uart_dump_trace(void) {
     const uint32_t count =
         fr_trace_snapshot(g_fr_demo_monitor_trace,
@@ -891,6 +963,10 @@ static void fr_demo_uart_process_command(uint8_t command) {
 
         case 't':
             fr_demo_uart_dump_trace();
+            break;
+
+        case 'x':
+            fr_demo_uart_emit_stress_status();
             break;
 
         case 'c':
@@ -1819,6 +1895,11 @@ static void fr_demo_task_b_entry(void *argument) {
     fr_demo_update_stack_diagnostics();
     fr_demo_update_kernel_invariants();
     fr_demo_update_trace_snapshot();
+    fr_demo_stress_update_diagnostics();
+
+    if (!fr_demo_stress_start()) {
+        ++g_fr_demo_stress_integration_errors;
+    }
 
     while (1) {
 
@@ -1873,6 +1954,7 @@ static void fr_demo_task_b_entry(void *argument) {
         if ((g_fr_demo_task_b_iterations &
              FR_DEMO_STACK_DIAGNOSTIC_MASK) == 0u) {
             fr_demo_update_stack_diagnostics();
+            fr_demo_stress_update_diagnostics();
         }
 
         if ((g_fr_demo_task_b_iterations &
@@ -2051,6 +2133,11 @@ static bool fr_demo_create_tasks(void) {
 
     if (!fr_task_get_info(g_fr_demo_monitor_task,
                           &g_fr_demo_monitor_task_info)) {
+        return false;
+    }
+
+    if (!fr_demo_stress_create_tasks()) {
+        ++g_fr_demo_stress_integration_errors;
         return false;
     }
 
@@ -2268,6 +2355,13 @@ static _Noreturn void fr_bootstrap_entry(void) {
     }
 
     if (g_fr_demo_ipc_timeout_init_failures != 0u) {
+        while (1) {
+        }
+    }
+
+    if (!fr_demo_stress_init()) {
+        ++g_fr_demo_stress_integration_errors;
+
         while (1) {
         }
     }
