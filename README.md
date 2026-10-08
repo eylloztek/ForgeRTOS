@@ -227,7 +227,6 @@ flowchart LR
 - [Metrics and benchmark methodology](docs/BENCHMARKS.md)
 - [UART monitor](docs/UART_MONITOR.md)
 - [Project structure](docs/PROJECT_STRUCTURE.md)
-- [Release checklist](docs/RELEASE_CHECKLIST.md)
 - [Changelog](CHANGELOG.md)
 - [v0.1.0 release notes](RELEASE_NOTES_v0.1.0.md)
 
