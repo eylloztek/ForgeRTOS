@@ -24,7 +24,7 @@
 #define FR_DEMO_STRESS_PAYLOAD_SEED          0xC001D00Du
 
 _Static_assert(FR_CONFIG_MAX_TASKS >= 7u,
-               "Day 34 stress test requires capacity for seven user tasks");
+               "Stress validation requires capacity for seven user tasks");
 _Static_assert((FR_DEMO_STRESS_TASK_STACK_WORDS % 2u) == 0u,
                "Stress task stacks must preserve 8-byte alignment");
 _Static_assert(FR_DEMO_STRESS_WORKER_PRIORITY <

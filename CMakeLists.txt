@@ -8,9 +8,9 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
-set(TARGET forgertos.elf)
+option(FR_BUILD_VALIDATION "Build the integration/stress validation firmware" OFF)
 
-add_executable(${TARGET}
+set(FR_COMMON_SOURCES
     startup/startup_stm32f446re.S
     kernel/scheduler.c
     kernel/semaphore.c
@@ -33,17 +33,9 @@ add_executable(${TARGET}
     port/cortex_m4/portasm.S
     bsp/stm32f446re/board.c
     bsp/stm32f446re/uart.c
-    src/main.c
-    src/stress.c
-    src/stress.c
 )
 
-target_include_directories(${TARGET} PRIVATE
-    include
-    kernel/include
-)
-
-target_compile_options(${TARGET} PRIVATE
+set(FR_COMMON_COMPILE_OPTIONS
     -mcpu=cortex-m4
     -mthumb
     -ffreestanding
@@ -60,20 +52,58 @@ target_compile_options(${TARGET} PRIVATE
     -Werror
 )
 
-target_link_options(${TARGET} PRIVATE
-    -mcpu=cortex-m4
-    -mthumb
-    -nostdlib
-    -nostartfiles
-    -Wl,--gc-sections
-    -Wl,--print-memory-usage
-    -Wl,-Map=${CMAKE_BINARY_DIR}/forgertos.map
-    -T${CMAKE_SOURCE_DIR}/linker/stm32f446re.ld
+function(fr_configure_firmware target output_stem)
+    target_include_directories(${target} PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/kernel/include
+    )
+
+    target_compile_options(${target} PRIVATE
+        ${FR_COMMON_COMPILE_OPTIONS}
+    )
+
+    target_link_options(${target} PRIVATE
+        -mcpu=cortex-m4
+        -mthumb
+        -nostdlib
+        -nostartfiles
+        -Wl,--gc-sections
+        -Wl,--print-memory-usage
+        -Wl,-Map=${CMAKE_BINARY_DIR}/${output_stem}.map
+        -T${CMAKE_SOURCE_DIR}/linker/stm32f446re.ld
+    )
+
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_OBJCOPY} -O ihex
+                $<TARGET_FILE:${target}>
+                ${CMAKE_BINARY_DIR}/${output_stem}.hex
+        COMMAND ${CMAKE_OBJCOPY} -O binary
+                $<TARGET_FILE:${target}>
+                ${CMAKE_BINARY_DIR}/${output_stem}.bin
+        COMMAND ${CMAKE_SIZE} $<TARGET_FILE:${target}>
+        COMMENT "Generating ${output_stem}.hex/.bin and printing image size"
+    )
+endfunction()
+
+add_executable(forgertos.elf
+    ${FR_COMMON_SOURCES}
+    src/main.c
+    src/demo.c
+    src/monitor.c
 )
 
-add_custom_command(TARGET ${TARGET} POST_BUILD
-    COMMAND ${CMAKE_OBJCOPY} -O ihex $<TARGET_FILE:${TARGET}> ${CMAKE_BINARY_DIR}/forgertos.hex
-    COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:${TARGET}> ${CMAKE_BINARY_DIR}/forgertos.bin
-    COMMAND ${CMAKE_SIZE} $<TARGET_FILE:${TARGET}>
-    COMMENT "Generating HEX/BIN images and printing image size"
-)
+fr_configure_firmware(forgertos.elf forgertos)
+
+if(FR_BUILD_VALIDATION)
+    add_executable(forgertos_validation.elf
+        ${FR_COMMON_SOURCES}
+        tests/integration/main.c
+        tests/integration/stress.c
+    )
+
+    target_include_directories(forgertos_validation.elf PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests/integration
+    )
+
+    fr_configure_firmware(forgertos_validation.elf forgertos_validation)
+endif()

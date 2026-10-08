@@ -1,0 +1,9 @@
+#ifndef FORGE_VERSION_H
+#define FORGE_VERSION_H
+
+#define FR_VERSION_MAJOR 0u
+#define FR_VERSION_MINOR 1u
+#define FR_VERSION_PATCH 0u
+#define FR_VERSION_STRING "0.1.0"
+
+#endif
